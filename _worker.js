@@ -1153,6 +1153,13 @@ async function getDomainStatus(target, config) {
     return result;
 }
 
+// 检测IP字符串是否为IPv6地址（含冒号且非纯IPv4格式）
+function isIPv6Address(ip) {
+    if (!ip || typeof ip !== 'string') return false;
+    // IPv6地址包含冒号；纯IPv4格式不含冒号
+    return ip.includes(':');
+}
+
 // 单次检测IP（不带重试）
 async function checkProxyIPOnce(addr, apiUrl, token) {
     try {
@@ -1165,7 +1172,15 @@ async function checkProxyIPOnce(addr, apiUrl, token) {
         if (!r.ok) return null;
 
         const data = safeJSONParse(await r.text(), null);
-        return data && typeof data === 'object' ? data : null;
+        if (!data || typeof data !== 'object') return null;
+
+        // 出口IP类型检测：出口IP为IPv6则判定不合格
+        if (data.success && data.ip && isIPv6Address(data.ip)) {
+            console.log(`⚠️ 出口IP为IPv6，不合格: ${addr} → 出口IP: ${data.ip}`);
+            return { ...data, success: false, failReason: 'IPv6出口' };
+        }
+
+        return data;
     } catch {
         return null;
     }
@@ -3051,7 +3066,8 @@ function renderHTML(C) {
                                 valid.push(checkTarget);
                                 log(\`  ✅ \${checkTarget} - \${r.colo} (\${r.responseTime}ms)\`, 'success');
                             } else {
-                                log(\`  ❌ \${checkTarget}\`, 'error');
+                                const reason = r.failReason ? \` [\${r.failReason}]\` : '';
+                                log(\`  ❌ \${checkTarget}\${reason}\`, 'error');
                             }
                         } catch (e) {
                             if (e.name !== 'AbortError') {
