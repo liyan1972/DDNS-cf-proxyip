@@ -1,5 +1,5 @@
 /**
- * DDNS Pro & Proxy IP Manager v7.0
+ * DDNS Pro & Proxy IP Manager v7.1
  */
 
 // ==================== 默认配置（环境变量未设置时使用） ====================
@@ -1153,11 +1153,27 @@ async function getDomainStatus(target, config) {
     return result;
 }
 
-// 检测IP字符串是否为IPv6地址（含冒号且非纯IPv4格式）
-function isIPv6Address(ip) {
-    if (!ip || typeof ip !== 'string') return false;
-    // IPv6地址包含冒号；纯IPv4格式不含冒号
-    return ip.includes(':');
+// 兼容新旧两种 CHECK_API 返回格式，统一提取 colo 字段
+// 新格式：colo 在 probe_results[0].exit.colo；旧格式：直接在顶层
+function normalizeCheckAPIResult(data) {
+    if (!data || typeof data !== 'object') return data;
+    if (data.colo) return data; // 旧格式，已有 colo，直接返回
+    // 新格式：从 probe_results 提取 colo
+    const firstProbe = Array.isArray(data.probe_results) ? data.probe_results[0] : null;
+    const colo = firstProbe?.exit?.colo || 'N/A';
+    return { ...data, colo };
+}
+
+// 判断检测结果是否为纯IPv6出口（不支持IPv4）
+// 新格式：直接读 supports_ipv4 字段
+// 旧格式：检查顶层 ip 字段是否含冒号（IPv6特征）
+function isIPv6OnlyExit(data) {
+    if ('supports_ipv4' in data) {
+        // 新格式：supports_ipv4 为 false 说明无IPv4出口能力
+        return data.supports_ipv4 === false;
+    }
+    // 旧格式：出口IP含冒号则为IPv6
+    return typeof data.ip === 'string' && data.ip.includes(':');
 }
 
 // 单次检测IP（不带重试）
@@ -1171,12 +1187,15 @@ async function checkProxyIPOnce(addr, apiUrl, token) {
         const r = await fetch(url, { signal: AbortSignal.timeout(GLOBAL_SETTINGS.CHECK_TIMEOUT) });
         if (!r.ok) return null;
 
-        const data = safeJSONParse(await r.text(), null);
-        if (!data || typeof data !== 'object') return null;
+        const raw = safeJSONParse(await r.text(), null);
+        if (!raw || typeof raw !== 'object') return null;
 
-        // 出口IP类型检测：出口IP为IPv6则判定不合格
-        if (data.success && data.ip && isIPv6Address(data.ip)) {
-            console.log(`⚠️ 出口IP为IPv6，不合格: ${addr} → 出口IP: ${data.ip}`);
+        // 统一格式（补齐 colo 等字段）
+        const data = normalizeCheckAPIResult(raw);
+
+        // 出口IP类型检测：不支持IPv4出口则判定不合格
+        if (data.success && isIPv6OnlyExit(data)) {
+            console.log(`⚠️ 出口不支持IPv4，不合格: ${addr}`);
             return { ...data, success: false, failReason: 'IPv6出口' };
         }
 
