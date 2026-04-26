@@ -19,7 +19,7 @@
 
 这是一个**自动管理维护cf-proxyip的工具**，让你的域名始终指向可用的反代cf的IP地址。例如：`us.dwb.cc.cd:443`
 
-具体应用场景可参考[什么是PROCYIP?](https://github.com/231128ikun/CF-Workers-CheckProxyIP/blob/main/README.md#-%E4%BB%80%E4%B9%88%E6%98%AF-proxyip-)
+具体应用场景可参考[什么是PROXYIP?](https://github.com/231128ikun/CF-Workers-CheckProxyIP/blob/main/README.md#-%E4%BB%80%E4%B9%88%E6%98%AF-proxyip-)
 
 
 
@@ -83,7 +83,7 @@ Worker → **Triggers** → **Cron Triggers** → 添加 `0 */3 * * *`（每3小
 
 ### ✅ 部署完成！
 
-访问 `https://你的worker名.你的子域名.workers.dev` 即可使用管理面板
+日常访问 `https://你的worker名.你的子域名.workers.dev/?key=你的AUTH_KEY` 即可使用管理面板
 
 </details>
 
