@@ -1,213 +1,138 @@
-# DDNS Pro - Cloudflare Workers 动态DNS & IP管理
+# DDNS Pro - Cloudflare Worker ProxyIP 管理面板
 
-基于外部 ProxyIP 检测 API 做的多域名动态DNS管理系统，支持地址记录（A/AAAA）和 TXT 记录维护，自动检测并替换失效IP。借助 CF 平台，无需服务器。
+一个部署在 Cloudflare Workers 上的动态 DNS 与 ProxyIP 维护工具。它通过外部 ProxyIP 检测 API 校验节点可用性，并自动维护 Cloudflare DNS 里的 `A`、`AAAA` 或 `TXT` 记录，让目标域名尽量保持指向可用的 ProxyIP。
 
-## 📋 主要功能
+项目不依赖自建服务器，核心代码是单文件 Worker：[`_worker.js`](./_worker.js)。
 
-- ✅ **多域名管理** - 支持同时管理多个域名的DNS记录
-- ✅ **两种模式** - 地址记录（A/AAAA）和 TXT记录
-- ✅ **自动维护** - 定时检测失效IP并自动补充
-- ✅ **Telegram通知** - 维护完成后推送详细报告
-- ✅ **Web管理界面** - 直观的可视化操作面板
-- ✅ **域名池绑定** - 支持不同域名绑定到不同的IP池
-- ✅ **KV配置** - 支持多套维护域名权限配置，前端保存到 KV 覆盖环境变量
-- ✅ **出口筛选** - 支持按 IPv4、IPv6、双栈出口以及国家、ASN 维护
+## 功能特性
 
+- 多域名维护：支持多个根域、多个 Cloudflare Zone 和多套 API Token。
+- 两种记录模式：地址记录模式维护 `A/AAAA`，TXT 模式维护一条 TXT 记录里的 IP 列表。
+- 自动补位：检测失效 IP，删除不合格记录，并从 IP 池补充新 IP。
+- IP 池管理：支持通用池、自定义池、域名绑定池和垃圾桶恢复。
+- 出口筛选：按 IPv4、IPv6、双栈、国家和 ASN 过滤候选节点。
+- Web 面板：导入、清洗、去重、筛选、探测、维护都可以在面板完成。
+- Telegram 通知：手动维护、IP 变化、库存不足或配置错误时可推送报告。
+- KV 配置：配置中心会把运行配置保存到 Cloudflare KV，覆盖环境变量默认值。
 
+## 适用场景
 
-### 简单理解
+这个项目适合用于维护 Cloudflare Worker / Pages 反代场景中常见的 ProxyIP，例如让 `kr.example.com`、`us.example.com` 等域名持续指向可用的反代 IP。
 
-这是一个**自动管理维护cf-proxyip的工具**，让你的域名始终指向可用的反代cf的IP地址。例如：`us.dwb.cc.cd:443`
+ProxyIP 的背景说明可参考：[什么是 ProxyIP?](https://github.com/231128ikun/CF-Workers-CheckProxyIP/blob/main/README.md#-%E4%BB%80%E4%B9%88%E6%98%AF-proxyip-)
 
-具体应用场景可参考[什么是PROXYIP?](https://github.com/231128ikun/CF-Workers-CheckProxyIP/blob/main/README.md#-%E4%BB%80%E4%B9%88%E6%98%AF-proxyip-)
+## 快速部署
 
+### 1. 准备 Cloudflare API Token
 
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)。
+2. 打开 **My Profile** -> **API Tokens**。
+3. 使用 **Edit zone DNS** 模板创建 Token。
+4. Zone Resources 选择需要维护 DNS 的域名。
+5. 保存 Token。Cloudflare 只会完整显示一次。
 
-<details>
-<summary><strong>🚀 快速部署（5分钟完成）</strong></summary>
+同时在域名概览页复制对应的 **Zone ID**。
 
-### 📊 部署流程
+> API Token 和 Zone ID 必须属于你要维护 DNS 的 Cloudflare 账号。Worker 本身可以部署在任意 Cloudflare 账号下。
 
-```
-准备工作 → 部署Worker → 配置环境 → 开始使用
-   ↓           ↓            ↓           ↓
-获取Token   复制代码    设置变量    访问面板
-获取ZoneID  部署到CF    绑定KV      导入IP
-```
+### 2. 创建 Worker
 
-### 1️⃣ 获取 Cloudflare API Token
+1. 进入 [Cloudflare Workers](https://dash.cloudflare.com/?to=/:account/workers)。
+2. 创建一个 Worker。
+3. 把 [`_worker.js`](./_worker.js) 的全部内容复制到 Worker 编辑器。
+4. 保存并部署。
 
-1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. 右上角头像 → **My Profile** → **API Tokens**
-3. **Create Token** → 选择 **Edit zone DNS** 模板
-4. 配置权限：Zone Resources 选择你的域名
-5. **Create Token** → **复制保存**（只显示一次！）
+### 3. 绑定 KV
 
-> 💡这个api token 和zone id 都是为了可以修改要维护的域名，所以别填错账号了，要填维护的域名所在账号。而这个项目可以部署在任意账号。
+KV 是必需项，用于保存配置、IP 池、垃圾桶和域名到池的绑定关系。
 
-### 2️⃣ 获取 Zone ID
+1. 在 [Workers KV](https://dash.cloudflare.com/?to=/:account/workers/kv/namespaces) 创建命名空间，名称可用 `IP_DATA`。
+2. 打开 Worker -> **Settings** -> **Bindings**。
+3. 添加 **KV Namespace** 绑定。
+4. Variable name 必须填写：
 
-1. 在 Cloudflare Dashboard 中选择你的域名
-2. 右侧 **API** 区域可以看到 **Zone ID**
-3. 复制保存
-
-### 3️⃣ 部署 Worker
-
-1. 访问 [Cloudflare Workers](https://dash.cloudflare.com/?to=/:account/workers)
-2. **Create Application** → **Create Worker**
-3. 复制 `_worker.js` 的全部内容，粘贴到编辑器
-4. **Save and Deploy**
-
-### 4️⃣ 绑定 KV（必须）
-
-1. 在 [KV](https://dash.cloudflare.com/?to=/:account/workers/kv/namespaces) 创建命名空间，名称建议：`IP_DATA`
-2. 回到 Worker → **Settings** → **Bindings** → **Add binding**
-3. Type: **KV Namespace**，Variable name 必须填写：`IP_DATA`
-4. 选择刚创建的 KV 命名空间并保存
-
-> 未绑定 `IP_DATA` 时，面板会显示明确提示；配置保存、IP 池和维护任务都不可用。
-
-### 5️⃣ 配置面板密钥（可选但建议）
-
-进入 Worker → **Settings** → **Variables**，只建议添加面板访问密钥：
-
-| 变量名 | 值 |
-|--------|-----|
-| `AUTH_KEY` | 面板访问密钥 |
-
-首次访问可用 `https://你的worker/?key=你的AUTH_KEY` 登录。其他维护配置（CF Key、Zone ID、维护域名、检测 API、TG 等）都可以在前端 **配置中心** 保存到 KV。
-
-### 6️⃣ 配置定时任务（可选）
-
-Worker → **Triggers** → **Cron Triggers** → 添加 `0 */3 * * *`（每3小时执行）
-
-### ✅ 部署完成！
-
-日常访问 `https://你的worker名.你的子域名.workers.dev/?key=你的AUTH_KEY` 即可使用管理面板
-
-</details>
-
----
-
-<details>
-<summary><strong>📖 使用教程</strong></summary>
-
-### 第一次使用
-
-#### Step 1: 添加IP到库存
-
-1. 在 **手动输入** 标签页输入IP列表（格式：`IP:端口`）
-```
-1.2.3.4:443
-5.6.7.8:8080
-```
-2. 点击 **检测清洗**（验证IP可用性）
-3. 点击 **追加入库**（保存到库存）
-
-#### Step 2: 执行维护
-
-点击 **执行全部维护**，系统会自动：
-- 检测现有DNS记录中的IP
-- 删除失效IP
-- 从库存补充新IP（若低于最小活跃数）
-- 发送Telegram通知（如已配置）
-
-### 日常操作
-
-#### 批量导入IP
-
-**从Excel导入：**
-1. Excel中准备 `IP地址` 和 `端口` 两列
-2. 选中数据 → Ctrl+C 复制
-3. 粘贴到管理面板 → **检测清洗** → **追加入库**
-
-**从远程URL加载：**
-
- 输入TXT文件URL → **加载** → **追加入库**
-
-#### 域名探测
-
-在 **Check ProxyIP** （实况解析右边输入框）输入域名，自动检测IP可用性：
-```
-example.com          # 探测A/AAAA记录
-example.com:8080     # 指定端口
-txt@example.com      # 探测TXT记录
+```text
+IP_DATA
 ```
 
-</details>
+未绑定 `IP_DATA` 时，面板可以打开，但配置保存、IP 池和维护任务不可用。
 
----
+### 4. 设置面板访问密钥
 
-<details>
-<summary><strong>⚙️ 环境变量详解</strong></summary>
+强烈建议设置 `AUTH_KEY`，否则公开 Worker 地址后任何人都可以进入管理面板。
 
-### 必须绑定
+Worker -> **Settings** -> **Variables** 添加：
+
+| 变量名 | 必填 | 说明 |
+| --- | --- | --- |
+| `AUTH_KEY` | 建议 | 管理面板访问密钥 |
+
+首次访问：
+
+```text
+https://你的-worker-url/?key=你的AUTH_KEY
+```
+
+登录后 Worker 会写入 HttpOnly Cookie，后续可直接打开面板。
+
+### 5. 在配置中心填写维护配置
+
+打开面板后进入 **配置中心**，建议把以下内容保存到 KV：
+
+1. 维护的域名配置：别名、根域、Zone ID、CF Key。
+2. 管理域名：前缀、记录类型、端口、最小活跃数、出口筛选、国家、ASN。
+3. 检测 API、备用检测 API、Telegram 配置和维护开关。
+
+配置中心保存后会写入 KV 的 `app_config`，优先级高于环境变量。
+
+### 6. 配置定时任务
+
+Worker -> **Triggers** -> **Cron Triggers** 添加，例如：
+
+```text
+0 */3 * * *
+```
+
+表示每 3 小时执行一次自动维护。
+
+## 配置说明
+
+### 必需绑定
 
 | 类型 | 名称 | 说明 |
-|------|------|------|
-| KV Namespace Binding | `IP_DATA` | 保存配置、IP 池、垃圾桶和域名池绑定 |
+| --- | --- | --- |
+| KV Namespace Binding | `IP_DATA` | 保存运行配置、IP 池、垃圾桶和域名池绑定 |
 
+### 可选环境变量
 
-### 建议环境变量
+这些变量只作为初始默认值。上线后更推荐在面板的配置中心维护，保存后写入 KV。
 
 | 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `AUTH_KEY` | 管理面板访问密钥 | 无 |
+| --- | --- | --- |
+| `AUTH_KEY` | 面板访问密钥 | 空 |
+| `CF_KEY` | Cloudflare API Token | 空 |
+| `CF_ZONEID` | Cloudflare Zone ID | 空 |
+| `CF_BASE_DOMAIN` | 根域，例如 `example.com` | 空 |
+| `CHECK_API` | 主 ProxyIP 检测接口 | `https://api.090227.xyz/check?proxyip=` |
+| `CHECK_API_BACKUP` | 备用检测接口 | 空 |
+| `DOH_API` | DNS over HTTPS 接口 | `https://cloudflare-dns.com/dns-query` |
+| `TG_TOKEN` | Telegram Bot Token | 空 |
+| `TG_ID` | Telegram Chat ID | 空 |
+| `TG_ENABLED` | Telegram 通知开关 | `true` |
+| `SCHEDULED_ENABLED` | 定时维护开关 | `true` |
 
-除 `AUTH_KEY` 外，其他配置建议在前端 **配置中心** 添加并点击“保存改动”写入 KV。旧环境变量 `CF_KEY`、`CF_ZONEID`、`CF_DOMAIN`、`CHECK_API`、`TG_TOKEN` 等仍兼容读取，但不再推荐作为主要配置方式。
+检测接口支持两种形式：
 
-### 配置中心
-
-配置中心分两层：
-
-- **维护的域名配置**：一张卡片对应一套维护权限，包含别名、维护根域、`Zone ID` 和 `CF Key`。可以添加多套 Cloudflare 账号或多个托管域名。
-- **管理域名**：选择一套维护配置，只填写前缀，例如维护根域 `b.com` + 前缀 `kr` 会生成 `kr.b.com`。卡片上可单独打开/关闭维护，编辑后点击“保存改动”写入 KV。
-
-自动维护是项目总开关，TG 通知是通知开关，二者都在配置中心用 ON/OFF 开关控制。每个管理域名也有独立维护开关，关闭后会在维护任务中跳过。
-
-> 💡TG通知策略：
-a.当出现失效ip，新增ip时，也就是域名内ip变动时会通知 
-b.当域名没有补充的ip来维持最小活跃数时 
-c.手动执行维护时
-
-### CF_DOMAIN 配置格式
-
-```
-[模式]@域名:[端口]&[最小活跃数]
-[模式]@域名:[端口]&[最小活跃数]|[出口类型]
+```text
+https://example.com/check?proxyip=
+https://example.com/check?proxyip={proxyip}
 ```
 
-**示例：**
-```bash
-# 地址记录模式（自动维护 A/AAAA）
-ddns.example.com:443&3
+使用 `{proxyip}` 时，Worker 会替换占位符；否则会把编码后的地址直接拼到 URL 末尾。
 
-# 只维护出口为 IPv4 的候选
-ddns.example.com:443&3|v4
+## IP 池格式
 
-# 只维护出口为 IPv6 的候选
-ddns.example.com:443&3|v6
-
-# 只维护双栈出口候选
-ddns.example.com:443&3|dual_stack
-
-# TXT记录模式
-txt@txt.example.com&5
-
-# 同一域名同时维护地址记录和 TXT：配置两条
-multi.example.com:8080&3,txt@multi.example.com&3
-
-# 多域名（逗号分隔）
-ddns1.example.com:443,txt@txt.example.com,multi.example.com:8080&3
-```
-
-`|出口类型` 可选，支持 `v4`、`v6`、`dual_stack`。不写时默认任意出口。旧的 `all@...` 环境变量会被兼容拆成地址记录和 TXT 两条目标，但新配置建议直接写两条。
-
-出口类型由检测 API 的实时返回结果判断，不依赖 IP 入库时的旧标记。这样可以避免节点出口能力变化后被过期标记误筛。
-
-### IP池存储格式
-
-检测清洗入库后统一保存为：
+检测清洗并入库后，IP 池按三字段保存：
 
 ```text
 ip:port,asn,country
@@ -221,147 +146,116 @@ ip:port,asn,country
 1.2.3.4:443,AS4766/AS13335,KR/US
 ```
 
-字段缺失时写 `null`。旧的 `ip:port # 注释` 和旧四字段 `ip:port,asn,country,stack` 格式仍可读取；新检测结果会按三字段 CSV 格式写回。
+字段缺失时写 `null`。旧格式 `ip:port # 注释` 和 `ip:port,asn,country,stack` 仍可读取；新检测结果会按三字段格式写回。
 
-### 通用筛选
+## 常用操作
 
-IP 输入框下方的筛选框支持简单表达式：
+### 导入 IP
+
+在 **手动输入** 中粘贴 IP 列表：
 
 ```text
-port:443 country:KR asn:AS4766
-country:KR | country:US
-port:443-2053 HK
+1.2.3.4:443
+5.6.7.8:8080
+[2606:4700::1]:443
 ```
 
-- 空格表示“且”，多个条件必须同时匹配。
-- `|` 表示“或”，任一分组匹配即可。
-- 支持字段：`port:`、`country:`、`asn:`，不带字段的内容按普通关键词匹配。
+然后点击：
 
-### 访问保护
+1. **检测清洗**：验证可用性并规范格式。
+2. **追加入库**：保存到当前 IP 池。
 
-设置 `AUTH_KEY` 后，首次访问需带参数：`https://你的域名/?key=你的AUTH_KEY`
+### 从 Excel 导入
 
-浏览器会保存登录状态，之后可直接访问。
+Excel 中准备 `IP地址` 和 `端口` 两列，复制后直接粘贴到输入框，再执行检测清洗和入库。
 
-</details>
+### 从远程 URL 加载
 
----
+输入一个 `http://` 或 `https://` 的 TXT 地址，点击加载。Worker 会拒绝常见内网、回环和元数据地址，避免误请求内部资源。
 
-<details>
-<summary><strong>🔧 高级配置</strong></summary>
+### 域名探测
 
-### 调整并发检测数量
+在探测输入框中可以输入：
 
-在代码中修改 `GLOBAL_SETTINGS`：
-
-```javascript
-const GLOBAL_SETTINGS = {
-    // ── IP 检测 ──
-    CONCURRENT_CHECKS: 32,       // 前端批量检测并发数
-    CHECK_TIMEOUT: 3000,         // 单次 ProxyIP 检测超时(ms)
-
-    // ── 网络超时 ──
-    REMOTE_LOAD_TIMEOUT: 5000,   // 远程 URL 加载超时(ms)
-    DOH_TIMEOUT: 5000,           // DNS over HTTPS 查询超时(ms)
-
-    // ── 数据限制 ──
-    DEFAULT_MIN_ACTIVE: 3,       // 默认最小活跃 IP 数
-    MAX_TRASH_SIZE: 1000,        // 垃圾桶最大条目数
-    MAX_POOL_NAME_LENGTH: 50,    // IP池名称最大长度
-    MAX_IPS_PER_DOMAIN: 50,      // 域名解析最多取多少个 IP
-};
+```text
+example.com
+example.com:8080
+txt@example.com
+1.2.3.4:443
+[2606:4700::1]:443
 ```
 
-### 自建 IP 检测 API
+## 维护逻辑
 
-参考项目：[CF-Workers-CheckProxyIP](https://github.com/cmliu/CF-Workers-CheckProxyIP)
+一次维护流程大致如下：
 
-部署后修改 `CHECK_API` 环境变量为你的 API 地址。
-
-当前 Worker 会把新旧检测接口字段统一成内部格式，优先兼容：
-
-- `success` / `ok` / `status`
-- `responseTime` / `latency` / `duration` / `elapsed` / `time`
-- `colo`
-- `proxyIP` / `proxyIp` / `ip`
-- `portRemote` / `port` / `remotePort`
-- `probe_results.ipv4.exit`、`probe_results.ipv6.exit`
-
-其中出口信息里的 `country`、`city`、`asn`、`asOrganization` 会用于前端展示、维护筛选、TG 通知，并在检测清洗入库时写入 CSV 元数据。
-
-地址记录模式会同时读取并维护 Cloudflare 的 `A` 和 `AAAA` 记录：IPv4 候选写入 `A`，IPv6 候选写入 `AAAA`。前端探测域名时也会同时解析 `A` / `AAAA`。
-
-### Telegram 通知配置
-
-1. 与 [@BotFather](https://t.me/botfather) 对话，发送 `/newbot` 创建机器人
-2. 与 [@userinfobot](https://t.me/userinfobot) 对话获取 Chat ID
-3. 配置环境变量 `TG_TOKEN` 和 `TG_ID`
-
-TG 通知会复用维护时的检测结果，展示域名、模式、端口、活跃数、新增/移除 IP、原因、机房、检测耗时、国家和 ASN。
-
-</details>
-
----
-
-<details>
-<summary><strong>🛠️ 工作原理</strong></summary>
-
-### 维护流程
-
-```
-定时触发 / 手动触发
-        ↓
-检测现有DNS记录中的IP
-        ↓
-按出口类型 / 国家 / ASN 过滤，删除失效或不匹配 IP → 移入垃圾桶
-        ↓
-活跃IP < 最小活跃数？
-    ├─ 是 → 从库存加载IP → 实时检测出口与元数据 → 添加到DNS
-    └─ 否 → 跳过
-        ↓
-按开关和通知条件发送Telegram通知
+```text
+读取目标配置
+  -> 读取绑定 IP 池
+  -> 查询 Cloudflare DNS 当前记录
+  -> 调用检测 API 校验当前 IP
+  -> 删除失效或不匹配筛选条件的记录
+  -> 从 IP 池挑选候选并实时检测
+  -> 补充到最小活跃数
+  -> 失效池条目移入垃圾桶
+  -> 按条件发送 Telegram 报告
 ```
 
-</details>
+通知触发条件：
 
----
+- 手动执行维护。
+- 有 IP 新增或删除。
+- 活跃 IP 数不足且无法补齐。
+- Cloudflare 配置错误。
 
-<details>
-<summary><strong>❓ 常见问题</strong></summary>
+## KV 数据键
 
-### 1. 检测清洗后库存没变化？
+Worker 会使用以下 KV key：
 
-检测清洗只验证IP可用性，**不会自动保存**。请点击 **追加入库** 按钮保存。
+| Key | 说明 |
+| --- | --- |
+| `app_config` | 面板保存的运行配置 |
+| `pool` | 默认通用 IP 池 |
+| `pool_<name>` | 自定义 IP 池 |
+| `pool_trash` | 垃圾桶 |
+| `domain_pool_mapping` | 管理域名到 IP 池的绑定 |
+| `pool_display_names` | IP 池显示名称 |
 
-### 2. 定时任务不工作？
+## 安全建议
 
-- 检查 Worker → **Triggers** → **Cron Triggers** 是否已添加
-- 检查 Cron 表达式格式（如 `0 */3 * * *`）
-- 查看 Worker → **Logs** 是否有执行记录
+- 一定要设置 `AUTH_KEY`。
+- Cloudflare API Token 只授予需要维护域名的 DNS 编辑权限，不要使用全局 API Key。
+- 不要把真实 Token、Zone ID、Telegram Token 写进仓库。
+- 如果公开部署地址，建议使用足够长的随机 `AUTH_KEY`。
+- 定期检查 Worker Logs，确认定时任务和检测 API 行为正常。
 
-### 3. IP检测一直失败？
+## 常见问题
 
-- 确保IP格式正确：`IP:端口`（如 `1.2.3.4:443`）
-- 检查 `CHECK_API` 环境变量是否配置正确
-- 确保目标IP的端口是开放的
+### 检测清洗后 IP 池没有变化？
 
-### 4. 如何获取 API Token 和 Zone ID？
+检测清洗只会验证和规范输入，不会自动保存。需要点击 **追加入库** 或 **覆盖入库**。
 
-👆 请参考上方 **🚀 快速部署** 章节的详细步骤。
+### 定时任务没有运行？
 
-</details>
+检查三项：
 
----
+1. Worker 是否绑定了 `IP_DATA`。
+2. Worker 是否添加了 Cron Trigger。
+3. 配置中心或环境变量里的 `SCHEDULED_ENABLED` 是否为开启状态。
 
-## 📚 相关项目
+### Cloudflare DNS 操作失败？
 
-- [CF-Workers-CheckProxyIP](https://github.com/cmliu/CF-Workers-CheckProxyIP) - CF ProxyIP检测API
-- [CF-Workers-DD2D](https://github.com/cmliu/CF-Workers-DD2D) - DDNS-cf域名
+确认 Zone ID、API Token 和根域属于同一个 Cloudflare Zone，并且 Token 有 DNS 编辑权限。
 
-## 📄 License
+### Telegram 没有通知？
 
-[MIT License](https://github.com/231128ikun/DDNS-cf-proxyip/blob/main/LICENSE)
+确认 `TG_TOKEN`、`TG_ID` 已保存，且配置中心里的 TG 通知开关处于开启状态。自动任务只有在满足通知触发条件时才会推送。
 
-## 📮 联系方式
+## 相关项目
 
-如有问题，请在 GitHub 提交 Issue。
+- [CF-Workers-CheckProxyIP](https://github.com/cmliu/CF-Workers-CheckProxyIP)
+- [CF-Workers-DD2D](https://github.com/cmliu/CF-Workers-DD2D)
+
+## License
+
+[MIT](./LICENSE)
