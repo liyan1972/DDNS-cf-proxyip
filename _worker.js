@@ -72,7 +72,7 @@ function getRuntimeSettings(config = {}) {
 }
 
 const APP_CONFIG_KEY = 'app_config';
-const APP_VERSION = '2026.04.30-15.25';
+const APP_VERSION = '2026.05.03-23.40';
 
 function safeJSONParse(str, defaultValue = null) {
     try { return str ? JSON.parse(str) : defaultValue; }
@@ -642,12 +642,6 @@ async function handleLookupDomain(url, config) {
 async function handleCheckIP(url, config) {
     const target = url.searchParams.get('ip');
     if (!target) return badRequest({ error: '缺少ip参数' });
-    const useBackup = url.searchParams.get('useBackup') === 'true';
-    if (useBackup && config.checkApiBackup) {
-        const addr = normalizeCheckAddr(target);
-        const result = await checkProxyIPOnce(addr, config.checkApiBackup, config);
-        return jsonResponse(result ?? { success: false });
-    }
     const res = await checkProxyIP(target, config);
     return jsonResponse(res);
 }
@@ -1569,17 +1563,10 @@ function buildCheckApiUrl(apiUrl, addr) {
 }
 
 // 批量检测IP列表，可选查询归属地
-async function batchCheckIPs(ipList, checkFn, config, useBackupApi = false) {
+async function batchCheckIPs(ipList, checkFn, config) {
     if (!ipList || ipList.length === 0) return [];
 
-    // 垃圾桶复检时使用备用接口（如有）独立验证
-    const effectiveCheckFn = (useBackupApi && config.checkApiBackup)
-        ? (addr) => {
-            const normalized = normalizeCheckAddr(addr);
-            return checkProxyIPOnce(normalized, config.checkApiBackup, config)
-                .then(r => r ?? { success: false });
-        }
-        : checkFn;
+    const effectiveCheckFn = checkFn;
 
     const checkSettled = await Promise.allSettled(ipList.map(addr => effectiveCheckFn(addr)));
     const checkResults = checkSettled.map((r, i) => r.status === 'fulfilled'
@@ -1707,15 +1694,15 @@ async function checkProxyIP(input, config) {
 
     // 主接口检测
     const result = await checkProxyIPOnce(addr, config.checkApi, config);
-    if (result !== null) return result;
+    if (result?.success) return result;
 
-    // 备用接口检测
+    // 主接口调用失败或判定不可用时，使用备用接口复检
     if (config.checkApiBackup) {
         const backup = await checkProxyIPOnce(addr, config.checkApiBackup, config);
         if (backup !== null) return backup;
     }
 
-    return normalizeCheckResult({ success: false }, addr);
+    return result ?? normalizeCheckResult({ success: false }, addr);
 }
 
 async function fetchCF(config, path, method = 'GET', body = null) {
@@ -4510,7 +4497,7 @@ function renderHTML(C, runtimeState = {}) {
         }
     }
     
-    async function batchCheck(useBackupApi = false) {
+    async function batchCheck() {
         const btn = document.getElementById('btn-check');
         const input = document.getElementById('ip-input');
         const lines = input.value.split('\\n').filter(i => i.trim());
@@ -4603,7 +4590,7 @@ function renderHTML(C, runtimeState = {}) {
                     // 检测所有目标IP
                     for (const checkTarget of checkTargets) {
                         try {
-                            const checkUrl = \`/api/check-ip?ip=\${encodeURIComponent(checkTarget)}\${useBackupApi ? '&useBackup=true' : ''}\`;
+                            const checkUrl = \`/api/check-ip?ip=\${encodeURIComponent(checkTarget)}\`;
                             const r = await apiFetch(checkUrl, {
                                 signal: signal
                             }).then(r => r.json());
@@ -4722,7 +4709,7 @@ function renderHTML(C, runtimeState = {}) {
         pausedCheckState = null;
 
         // 继续检测
-        return await batchCheck(cleaningPool === POOL_TRASH_KEY);
+        return await batchCheck();
     }
     
     // 放弃检测
@@ -5300,8 +5287,7 @@ function renderHTML(C, runtimeState = {}) {
         }
 
         // 2. 检测（等待检测完成或中断）
-        // 垃圾桶复检时使用备用接口（如有）独立验证
-        const checkResult = await batchCheck(isTrash);
+        const checkResult = await batchCheck();
 
         // 3. 只有完全检测完成才自动保存，中断或放弃则不保存
         const content = document.getElementById('ip-input').value;
