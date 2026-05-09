@@ -1,5 +1,5 @@
 /**
- * DDNS Pro & Proxy IP Manager v7.1
+ * DDNS Pro & Proxy IP Manager v7.2
  */
 
 // ==================== 默认配置（环境变量未设置时使用） ====================
@@ -1153,26 +1153,37 @@ async function getDomainStatus(target, config) {
     return result;
 }
 
-// 兼容新旧两种 CHECK_API 返回格式，统一提取 colo 字段
-// 新格式：colo 在 probe_results[0].exit.colo；旧格式：直接在顶层
+// 兼容新旧两种 CHECK_API 返回格式，统一提取 colo / loc / city 字段
+// 新格式：相关值在 probe_results[].exit 中；优先取 probe_name==='ipv4' 且 ok===true 的条目
+// 旧格式：colo / loc / city 已在顶层，直接透传
 function normalizeCheckAPIResult(data) {
     if (!data || typeof data !== 'object') return data;
-    if (data.colo) return data; // 旧格式，已有 colo，直接返回
-    // 新格式：从 probe_results 提取 colo
-    const firstProbe = Array.isArray(data.probe_results) ? data.probe_results[0] : null;
-    const colo = firstProbe?.exit?.colo || 'N/A';
-    return { ...data, colo };
+    if (data.colo) return data; // 旧格式，顶层已有 colo，直接透传
+
+    // 新格式：从 probe_results 中找最合适的条目（优先 ipv4 探测且成功）
+    const probes = Array.isArray(data.probe_results) ? data.probe_results : [];
+    const probe = probes.find(p => p.probe_name === 'ipv4' && p.ok)
+                || probes.find(p => p.ok)
+                || probes[0]
+                || null;
+    const exit = probe?.exit || {};
+
+    return {
+        ...data,
+        colo: exit.colo || 'N/A',
+        loc:  exit.country || 'N/A',
+        city: exit.city    || 'N/A',
+    };
 }
 
-// 判断检测结果是否为纯IPv6出口（不支持IPv4）
-// 新格式：直接读 supports_ipv4 字段
-// 旧格式：检查顶层 ip 字段是否含冒号（IPv6特征）
+// 判断检测结果是否为纯IPv6出口，应予排除
+// 新格式：inferred_stack === 'ipv6_only'
+// 旧格式：顶层 ip 字段含冒号（IPv6特征）
 function isIPv6OnlyExit(data) {
-    if ('supports_ipv4' in data) {
-        // 新格式：supports_ipv4 为 false 说明无IPv4出口能力
-        return data.supports_ipv4 === false;
+    if ('inferred_stack' in data) {
+        return data.inferred_stack === 'ipv6_only';
     }
-    // 旧格式：出口IP含冒号则为IPv6
+    // 旧格式回退
     return typeof data.ip === 'string' && data.ip.includes(':');
 }
 
