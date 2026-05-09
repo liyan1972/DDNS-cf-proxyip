@@ -4,8 +4,8 @@
 
 const GLOBAL_SETTINGS = {
     // ── IP 检测 ──
-    CONCURRENT_CHECKS: 32,       // 前端批量检测并发数（参考检测页实现）
-    CHECK_TIMEOUT: 3000,         // 单次 ProxyIP 检测超时(ms)
+    CONCURRENT_CHECKS: 15,       // 前端批量检测并发数（参考检测页实现）
+    CHECK_TIMEOUT: 5000,         // 单次 ProxyIP 检测超时(ms)
 
     // ── 网络超时 ──
     REMOTE_LOAD_TIMEOUT: 5000,   // 远程 URL 加载超时(ms)
@@ -72,7 +72,7 @@ function getRuntimeSettings(config = {}) {
 }
 
 const APP_CONFIG_KEY = 'app_config';
-const APP_VERSION = '2026.05.03-23.40';
+const APP_VERSION = '2026.05.09-22.00';
 
 function safeJSONParse(str, defaultValue = null) {
     try { return str ? JSON.parse(str) : defaultValue; }
@@ -158,8 +158,36 @@ function parsePoolEntry(line) {
     return {
         address,
         asn: fields[1] || null,
-        country: fields[2] || null
+        country: fields[2] || null,
+        stack: fields[3] || null
     };
+}
+
+function formatPoolAsn(asn) {
+    const values = String(asn || '').split(/[\/,\s]+/).map(item => item.trim()).filter(Boolean);
+    if (!values.length) return 'null';
+    return values.map(item => item.toUpperCase().startsWith('AS') ? item.toUpperCase() : `AS${item}`).join('/');
+}
+
+function formatPoolStack(stack) {
+    const normalized = normalizeStackFilter(stack);
+    return ['v4', 'v6', 'v4/v6'].includes(normalized) ? normalized : 'null';
+}
+
+function buildPoolEntryFromCheckResult(addr, result) {
+    const parsed = parseAddr(addr);
+    return [
+        parsed.address || normalizeCheckAddr(addr),
+        formatPoolAsn(result?.asn),
+        result?.country || 'null',
+        formatPoolStack(result?.stack)
+    ].join(',');
+}
+
+function poolEntryNeedsMetadataRefresh(entry) {
+    const meta = parsePoolEntry(entry);
+    if (!meta) return false;
+    return isUnknownMetaValue(meta.asn) || isUnknownMetaValue(meta.country) || isUnknownMetaValue(meta.stack);
 }
 
 function normalizeStackFilter(value) {
@@ -938,11 +966,13 @@ async function handleRestoreFromTrash(request, env) {
 
             const toPool = pickTargetPoolFromTrashEntry(trashEntry);
             const poolObj = await loadPool(toPool);
+            const restoredEntry = parseIPLine(trashEntry) || ip;
+            const restoredKey = extractIPKey(restoredEntry);
 
-            // 添加到目标池（如果不存在）- 只恢复纯净的IP:PORT，不携带垃圾桶注释
-            if (!poolObj.set.has(ip)) {
-                poolObj.list.push(ip);
-                poolObj.set.add(ip);
+            // 添加到目标池（如果不存在）- 保留 IP 池元数据，不携带垃圾桶注释
+            if (restoredKey && !poolObj.set.has(restoredKey)) {
+                poolObj.list.push(restoredEntry);
+                poolObj.set.add(restoredKey);
                 restored++;
                 restoredByPool[toPool] = (restoredByPool[toPool] || 0) + 1;
             }
@@ -1208,7 +1238,11 @@ async function batchAddToTrash(env, entries, config = {}) {
 
     for (const { ipAddr, reason, poolKey } of entries) {
         if (!trashIPSet.has(ipAddr)) {
-            const trashEntry = `${ipAddr} # ${reason} ${timestamp}${poolKey ? ' 来自 ' + poolKey : ''}`;
+            const poolEntry = parsePoolEntry(ipAddr);
+            const cleanEntry = poolEntry
+                ? [poolEntry.address, poolEntry.asn || 'null', poolEntry.country || 'null', formatPoolStack(poolEntry.stack)].join(',')
+                : ipAddr;
+            const trashEntry = `${cleanEntry} # ${reason} ${timestamp}${poolKey ? ' 来自 ' + poolKey : ''}`;
             trashList.push(trashEntry);
             trashIPSet.add(ipAddr);
         }
@@ -1551,9 +1585,26 @@ function targetMetaMatchesResult(result, target) {
     return true;
 }
 
+function isUnknownMetaValue(value) {
+    const text = String(value ?? '').trim().toLowerCase();
+    return !text || text === 'null' || text === 'unknown' || text === 'n/a' || text === '-';
+}
+
 function targetMetaMatchesStoredEntry(entry, target) {
     const meta = parsePoolEntry(entry);
-    return targetMetaMatchesResult({ country: meta?.country, asn: meta?.asn }, target);
+    if (!meta) return true;
+    if (target.country && !isUnknownMetaValue(meta.country)) {
+        const countries = String(meta.country || '').toUpperCase().split(/[\/,\s]+/).filter(Boolean);
+        if (!countries.includes(String(target.country).toUpperCase())) return false;
+    }
+    if (target.asn && !isUnknownMetaValue(meta.asn)) {
+        const asns = String(meta.asn || '').replace(/AS/gi, '').split(/[\/,\s]+/).filter(Boolean);
+        if (!asns.includes(String(target.asn).replace(/^AS/i, ''))) return false;
+    }
+    if (normalizeExitFilter(target.exitFilter) !== 'any' && !isUnknownMetaValue(meta.stack)) {
+        if (!exitFilterMatchesResult({ stack: meta.stack }, target.exitFilter)) return false;
+    }
+    return true;
 }
 
 function buildCheckApiUrl(apiUrl, addr) {
@@ -1844,8 +1895,9 @@ function appendCheckDetail(report, item, result) {
 
 function removePoolEntry(poolList, ipAddr) {
     const before = poolList.length;
+    const entry = poolList.find(p => extractIPKey(p) === ipAddr) || '';
     const next = poolList.filter(p => extractIPKey(p) !== ipAddr);
-    return { list: next, removed: before !== next.length };
+    return { list: next, removed: before !== next.length, entry };
 }
 
 async function savePoolAndTrash(env, poolKey, poolList, poolModified, trashBatch, config = {}) {
@@ -1910,7 +1962,7 @@ async function maintainARecords(env, target, addLog, report, poolKey, checkFn, c
             report.poolRemoved++;
             poolModified = true;
         }
-        trashBatch.push({ ipAddr: item.addr, reason: result.success ? '出口/国家/ASN不匹配' : '维护失效', poolKey });
+        trashBatch.push({ ipAddr: removed.entry || item.addr, reason: result.success ? '出口/国家/ASN不匹配' : '维护失效', poolKey });
         addLog(result.success
             ? `  ❌ ${item.addr} - 出口/国家/ASN不匹配，已删除`
             : `  ❌ ${item.addr} - 失效已删除，已放入垃圾桶`);
@@ -1929,9 +1981,15 @@ async function maintainARecords(env, target, addLog, report, poolKey, checkFn, c
             if (!ipPort || parsed.port !== target.port || validHosts.includes(parsed.host)) continue;
 
             const result = normalizeCheckResult(await checkFn(ipPort), ipPort);
+            const shouldRefreshPoolEntry = result.success && poolEntryNeedsMetadataRefresh(item);
             const matches = result.success && exitFilterMatchesResult(result, target.exitFilter) && targetMetaMatchesResult(result, target);
             if (!matches) {
                 if (result.success) {
+                    if (shouldRefreshPoolEntry) {
+                        const refreshed = buildPoolEntryFromCheckResult(ipPort, result);
+                        poolList = poolList.map(line => extractIPKey(line) === ipPort ? refreshed : line);
+                        poolModified = true;
+                    }
                     addLog(`  ⏭️ ${ipPort} - 出口/国家/ASN不匹配`);
                 } else {
                     const removed = removePoolEntry(poolList, ipPort);
@@ -1940,7 +1998,7 @@ async function maintainARecords(env, target, addLog, report, poolKey, checkFn, c
                         report.poolRemoved++;
                         poolModified = true;
                     }
-                    trashBatch.push({ ipAddr: ipPort, reason: '补充检测失败', poolKey });
+                    trashBatch.push({ ipAddr: removed.entry || ipPort, reason: '补充检测失败', poolKey });
                     addLog(`  ❌ ${ipPort} - 检测失败，从池中移除并放入垃圾桶`);
                 }
                 continue;
@@ -1953,6 +2011,11 @@ async function maintainARecords(env, target, addLog, report, poolKey, checkFn, c
             }
             validHosts.push(parsed.host);
             report.added.push({ ip: ipPort, colo: result.colo || 'N/A', time: result.responseTime || '-', country: result.country || 'null', asn: result.asn || 'null' });
+            if (shouldRefreshPoolEntry) {
+                const refreshed = buildPoolEntryFromCheckResult(ipPort, result);
+                poolList = poolList.map(line => extractIPKey(line) === ipPort ? refreshed : line);
+                poolModified = true;
+            }
             addLog(`  ✅ ${ipPort} - ${result.colo} (${result.responseTime}ms)`);
         }
 
@@ -2007,7 +2070,7 @@ async function maintainTXTRecords(env, target, addLog, report, poolKey, checkFn,
             report.poolRemoved++;
             poolModified = true;
         }
-        trashBatch.push({ ipAddr: item.addr, reason: result.success ? '出口/国家/ASN不匹配' : '维护失效', poolKey });
+        trashBatch.push({ ipAddr: removed.entry || item.addr, reason: result.success ? '出口/国家/ASN不匹配' : '维护失效', poolKey });
         addLog(result.success
             ? `  ❌ ${item.addr} - 出口/国家/ASN不匹配，已从TXT移除`
             : `  ❌ ${item.addr} - 失效，已从TXT移除并放入垃圾桶`);
@@ -2025,9 +2088,15 @@ async function maintainTXTRecords(env, target, addLog, report, poolKey, checkFn,
             if (!ipPort || validIPs.includes(ipPort)) continue;
 
             const result = normalizeCheckResult(await checkFn(ipPort), ipPort);
+            const shouldRefreshPoolEntry = result.success && poolEntryNeedsMetadataRefresh(item);
             const matches = result.success && exitFilterMatchesResult(result, target.exitFilter) && targetMetaMatchesResult(result, target);
             if (!matches) {
                 if (result.success) {
+                    if (shouldRefreshPoolEntry) {
+                        const refreshed = buildPoolEntryFromCheckResult(ipPort, result);
+                        poolList = poolList.map(line => extractIPKey(line) === ipPort ? refreshed : line);
+                        poolModified = true;
+                    }
                     addLog(`  ⏭️ ${ipPort} - 出口/国家/ASN不匹配`);
                 } else {
                     const removed = removePoolEntry(poolList, ipPort);
@@ -2036,7 +2105,7 @@ async function maintainTXTRecords(env, target, addLog, report, poolKey, checkFn,
                         report.poolRemoved++;
                         poolModified = true;
                     }
-                    trashBatch.push({ ipAddr: ipPort, reason: '补充检测失败', poolKey });
+                    trashBatch.push({ ipAddr: removed.entry || ipPort, reason: '补充检测失败', poolKey });
                     addLog(`  ❌ ${ipPort} - 检测失败，从池中移除并放入垃圾桶`);
                 }
                 continue;
@@ -2044,6 +2113,11 @@ async function maintainTXTRecords(env, target, addLog, report, poolKey, checkFn,
 
             validIPs.push(ipPort);
             report.added.push({ ip: ipPort, colo: result.colo || 'N/A', time: result.responseTime || '-', country: result.country || 'null', asn: result.asn || 'null' });
+            if (shouldRefreshPoolEntry) {
+                const refreshed = buildPoolEntryFromCheckResult(ipPort, result);
+                poolList = poolList.map(line => extractIPKey(line) === ipPort ? refreshed : line);
+                poolModified = true;
+            }
             addLog(`  ✅ ${ipPort} - ${result.colo} (${result.responseTime}ms)`);
         }
 
@@ -3434,7 +3508,7 @@ function renderHTML(C, runtimeState = {}) {
                             <button class="btn btn-sm btn-outline-secondary" onclick="quickDeduplicate()" title="去除重复IP">去重</button>
                         </div>
                         <div id="filter-help" class="filter-help">
-                            支持空格分隔条件：<code>port:443</code>、<code>port:443-2053</code>、<code>country:KR</code>、<code>asn:AS4766</code>、普通关键词。空格表示“且”，竖线 <code>|</code> 表示“或”，例如 <code>country:KR asn:AS4766 | country:US</code>。
+                            支持空格分隔条件：<code>port:443</code>、<code>port:443-2053</code>、<code>country:国家代码</code>、<code>asn:ASN编号</code>、普通关键词。空格表示“且”，竖线 <code>|</code> 表示“或”,例如 <code>country:KR asn:AS4766 | country:US</code>
                         </div>
                         <div id="filter-preview" class="filter-preview">输入条件后会显示匹配数量。</div>
                         <span class="text-secondary small pool-stat" title="当前池中IP数量">📊<span id="pool-count">0</span></span>
@@ -4000,8 +4074,8 @@ function renderHTML(C, runtimeState = {}) {
                 <label class="field"><span>域名前缀</span><small>留空表示根域。</small><input id="edit-target-prefix" class="form-control form-control-sm" value="\${escapeHTML(target.prefix || '')}" placeholder="kr"></label>
                 <label class="field"><span>端口</span><small id="edit-target-port-hint">A/AAAA 模式使用，TXT 为任意。</small><input id="edit-target-port" class="form-control form-control-sm" value="\${escapeHTML(portValue)}" data-a-port="\${escapeHTML(previousAPort)}" placeholder="443"></label>
                 <label class="field"><span>活跃数</span><small>最小可用数量。</small><input id="edit-target-min" type="number" min="0" class="form-control form-control-sm" value="\${escapeHTML(String(target.minActive ?? 3))}" placeholder="3"></label>
-                <label class="field"><span>国家</span><small>可选，例如 KR。</small><input id="edit-target-country" class="form-control form-control-sm" value="\${escapeHTML(target.country || '')}" placeholder="KR"></label>
-                <label class="field"><span>ASN</span><small>可选，例如 AS4766。</small><input id="edit-target-asn" class="form-control form-control-sm" value="\${escapeHTML(target.asn || '')}" placeholder="AS4766"></label>
+                <label class="field"><span>国家</span><small>可选，填写国家代码。</small><input id="edit-target-country" class="form-control form-control-sm" value="\${escapeHTML(target.country || '')}" placeholder="国家代码"></label>
+                <label class="field"><span>ASN</span><small>可选，填写 ASN 编号。</small><input id="edit-target-asn" class="form-control form-control-sm" value="\${escapeHTML(target.asn || '')}" placeholder="ASN编号"></label>
             </div>
             <input type="hidden" id="edit-target-enabled" value="\${target.enabled !== false ? 'true' : 'false'}">
             <div class="config-edit-actions">
@@ -4337,9 +4411,10 @@ function renderHTML(C, runtimeState = {}) {
         const port = result.portRemote || parsed.port;
         const asn = result.asn || (Array.isArray(result.exits) ? Array.from(new Set(result.exits.map(exit => exit.asn).filter(Boolean))).join('/') : '') || 'null';
         const country = result.country || (Array.isArray(result.exits) ? Array.from(new Set(result.exits.map(exit => exit.country).filter(Boolean))).join('/') : '') || 'null';
+        const stack = result.stack || 'null';
         const host = String(ip || '').replace(/^\\[/, '').replace(/\\]$/, '');
         const address = host.includes(':') ? \`[\${host}]:\${port}\` : \`\${host}:\${port}\`;
-        return \`\${address},\${formatAsn(asn) || 'null'},\${country || 'null'}\`;
+        return \`\${address},\${formatAsn(asn) || 'null'},\${country || 'null'},\${stack || 'null'}\`;
     }
 
     function formatLatencyValue(value) {
