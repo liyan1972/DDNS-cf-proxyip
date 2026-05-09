@@ -1,8 +1,10 @@
 # DDNS Pro - Cloudflare Worker ProxyIP 管理面板
 
-一个部署在 Cloudflare Workers 上的动态 DNS 与 ProxyIP 维护工具。它通过外部 ProxyIP 检测 API 校验节点可用性，并自动维护 Cloudflare DNS 里的 `A`、`AAAA` 或 `TXT` 记录，让目标域名尽量保持指向可用的 ProxyIP。
+一个部署在 Cloudflare Workers 上的动态 DNS 与 ProxyIP 维护工具。它通过**外部 ProxyIP 检测 API** 校验节点可用性，并自动维护 Cloudflare DNS 里的 `A`、`AAAA` 或 `TXT` 记录，让目标域名尽量保持指向可用的 ProxyIP。
 
 项目不依赖自建服务器，核心代码是单文件 Worker：[`_worker.js`](./_worker.js)。
+
+> 本项目依赖check-proxyip-api，若要自行部署暂无具体的开源代码，其中主要的原理见下方参考代码。
 
 ## 功能特性
 
@@ -129,6 +131,67 @@ https://example.com/check?proxyip={proxyip}
 ```
 
 使用 `{proxyip}` 时，Worker 会替换占位符；否则会把编码后的地址直接拼到 URL 末尾。
+
+### 检测 API 返回字段
+
+Worker 会以 `GET` 请求调用检测接口，请求地址中的 `proxyip` 值为待检测地址，例如 `1.2.3.4:443` 或 `[2606:4700::1]:443`。接口需要返回 JSON 对象；HTTP 非 2xx、非 JSON 或超时都会视为本次检测失败，并在配置了备用检测接口时继续复检。
+
+代码实际消费的返回字段样式如下：
+
+```json
+{
+  "success": true,
+  "proxyIP": "1.2.3.4",
+  "portRemote": "443",
+  "responseTime": 123,
+  "colo": "HKG",
+  "inferred_stack": "v4/v6",
+  "exits": [
+    {
+      "stack": "ipv4",
+      "ip": "203.0.113.10",
+      "colo": "HKG",
+      "country": "HK",
+      "city": "Hong Kong",
+      "asn": 64500,
+      "asOrganization": "Example Network"
+    },
+    {
+      "stack": "ipv6",
+      "ip": "2001:db8::10",
+      "colo": "HKG",
+      "country": "HK",
+      "city": "Hong Kong",
+      "asn": 64501,
+      "asOrganization": "Example Network"
+    }
+  ]
+}
+```
+
+字段说明：
+
+| 字段 | 用途 |
+| --- | --- |
+| `success` | 判断节点是否可用。维护流程和检测清洗只保留可用节点。 |
+| `proxyIP` | 检测清洗后写入 IP 池的地址；缺失时使用请求中的 IP。 |
+| `portRemote` | 检测清洗后写入 IP 池的端口；缺失时使用请求中的端口。 |
+| `responseTime` | 面板、维护日志和通知里展示的检测耗时。 |
+| `colo` | 面板、维护日志和通知里展示的 Cloudflare 机房。 |
+| `inferred_stack` | 节点出口类型，建议返回 `v4`、`v6` 或 `v4/v6`，用于出口筛选和 IP 池第四字段。 |
+| `exits` | 出口详情列表，用于面板展示，并汇总生成 IP 池里的 `asn,country,stack`。 |
+
+`exits` 数组对象字段：
+
+| 字段 | 用途 |
+| --- | --- |
+| `stack` | 单个出口类型，例如 `ipv4` 或 `ipv6`。 |
+| `ip` | 面板展示的出口 IP。 |
+| `colo` | 出口机房。 |
+| `country` | 面板展示、国家筛选和 IP 池第三字段。 |
+| `city` | 面板出口位置展示。 |
+| `asn` | 面板展示、ASN 筛选和 IP 池第二字段。 |
+| `asOrganization` | 面板展示的 ASN 组织名称。 |
 
 ## IP 池格式
 
