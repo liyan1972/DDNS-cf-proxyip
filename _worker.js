@@ -1154,23 +1154,44 @@ async function getDomainStatus(target, config) {
 }
 
 // 兼容新旧两种 CHECK_API 返回格式，统一提取 colo / loc / city 字段
-// 新格式：相关值在 probe_results[].exit 中；优先取 probe_name==='ipv4' 且 ok===true 的条目
-// 旧格式：colo / loc / city 已在顶层，直接透传
+// 新格式 v2：probe_results 是对象（key=探测名），顶层 colo 是 Worker 自身机房（不可用）
+// 新格式 v1：probe_results 是数组，每项含 probe_name 字段
+// 旧格式：colo / loc / city 直接在顶层，无 probe_results
 function normalizeCheckAPIResult(data) {
     if (!data || typeof data !== 'object') return data;
-    if (data.colo) return data; // 旧格式，顶层已有 colo，直接透传
 
-    // 新格式：从 probe_results 中找最合适的条目（优先 ipv4 探测且成功）
+    // 新格式 v2：有 inferred_stack 且 probe_results 是普通对象（非数组）
+    // 顶层 colo 是 Worker 机房，需从 probe_results[probe_name].exit 取出口机房
+    if ('inferred_stack' in data && data.probe_results &&
+        typeof data.probe_results === 'object' && !Array.isArray(data.probe_results)) {
+        const probeMap = data.probe_results;
+        // 优先取 ipv4 探测成功条目，否则取第一个成功的，再退一步取第一条
+        const probe = (probeMap['ipv4']?.ok ? probeMap['ipv4'] : null)
+                   || Object.values(probeMap).find(p => p.ok)
+                   || Object.values(probeMap)[0]
+                   || null;
+        const exit = probe?.exit || {};
+        return {
+            ...data,
+            colo: exit.colo    || 'N/A',
+            loc:  exit.country || 'N/A',
+            city: exit.city    || 'N/A',
+        };
+    }
+
+    // 旧格式：顶层已有正确的 colo，直接透传
+    if (data.colo) return data;
+
+    // 新格式 v1：probe_results 是数组，含 probe_name 字段
     const probes = Array.isArray(data.probe_results) ? data.probe_results : [];
     const probe = probes.find(p => p.probe_name === 'ipv4' && p.ok)
-                || probes.find(p => p.ok)
-                || probes[0]
-                || null;
+               || probes.find(p => p.ok)
+               || probes[0]
+               || null;
     const exit = probe?.exit || {};
-
     return {
         ...data,
-        colo: exit.colo || 'N/A',
+        colo: exit.colo    || 'N/A',
         loc:  exit.country || 'N/A',
         city: exit.city    || 'N/A',
     };
