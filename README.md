@@ -41,7 +41,7 @@ ProxyIP 的背景说明可参考：[什么是 ProxyIP?](https://github.com/23112
 ## 💡 快速部署
 
 > [!TIP]
-> 推荐部署顺序：复制 Worker 代码 并部署 -> 绑定 KV -> 可选设置 `AUTH_KEY` -> 打开面板 -> 配置中心保存配置 -> 设置corn触发器
+> 推荐部署顺序：复制 Worker 代码并部署 -> 绑定 KV -> 可选设置 `AUTH_KEY` -> 打开面板 -> 配置中心保存配置 -> 设置 cron 触发器
 
 ### ⚙️ Workers 部署
 
