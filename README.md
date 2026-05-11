@@ -55,7 +55,7 @@ ProxyIP 的背景说明可参考：[什么是 ProxyIP?](https://github.com/23112
    - 保存并部署。
 
 2. 绑定 KV 命名空间：
-   - 在 [Workers KV](https://dash.cloudflare.com/?to=/:account/workers/kv/namespaces) 创建命名空间，名称可用 `IP_DATA`。
+   - 在 [Workers KV](https://dash.cloudflare.com/?to=/:account/workers/kv/namespaces) 创建命名空间，名称可用 `IP_DATA`也可任意。
    - 打开 Worker -> **Settings** -> **Bindings**。
    - 添加 **KV Namespace** 绑定。
    - `Variable name` 必须填写 `IP_DATA`。
@@ -105,9 +105,9 @@ ProxyIP 的背景说明可参考：[什么是 ProxyIP?](https://github.com/23112
 <details>
 <summary><code><strong>「 Worker 自动部署文字教程 」</strong></code></summary>
 
-1. Fork 本仓库并在 Cloudflare 中连接该仓库。
+1. Fork 本仓库并在 Cloudflare 中连接该仓库。（可以顺手点个star）
 
-2. Cloudflare 中创建/连接的 Worker 项目名称需与 [`wrangler.toml`](./wrangler.toml) 里的 `name` 保持一致，例如 `ddns-cf-proxyip`。
+2. Cloudflare 中创建/连接的 Worker 项目名称需与 [`wrangler.toml`](./wrangler.toml) 里的 `name` 保持一致，例如 `ddns-cf-proxyip`，不然后续更新会冲突。
 
 3. 然后环境变量可选设置面板密码，进入面板配置即可使用。
 
@@ -133,7 +133,7 @@ ProxyIP 的背景说明可参考：[什么是 ProxyIP?](https://github.com/23112
 4. Zone Resources 选择需要维护 DNS 的域名。
 5. 保存 Token。Cloudflare 只会完整显示一次。
 
-同时在域名概览页复制对应`域名`的 **Zone ID**（**区域ID**）。
+同时在域名概览页点击右侧三个点，复制对应`域名`的 **Zone ID**（**区域ID**）。
 
 > API Token 和 Zone ID 是你要维护的域名的 Cloudflare 账号中的。而这个项目可以部署在任意 Cloudflare 账号下。
 
