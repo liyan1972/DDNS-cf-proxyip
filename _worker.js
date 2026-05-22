@@ -4,7 +4,7 @@
 
 // ==================== Editable configuration ====================
 // Change these values first when tuning runtime behavior.
-const APP_VERSION = '2026.05.22-12.37';
+const APP_VERSION = '2026.05.22-16.36';
 const APP_CONFIG_KEY = 'app_config';
 
 const GLOBAL_SETTINGS = {
@@ -2226,8 +2226,9 @@ async function maintainAllDomains(env, isManual = false, config) {
         };
 
         addLog(`🚀 开始维护: ${target.domain}`);
-        // 内联 getPoolKeyForDomain
-        const mappedPoolKey = domainPoolMapping?.[target.domain] ?? POOL_DEFAULT_KEY;
+        const targetPoolKey = getTargetDuplicateKey(target);
+        const targetDomain = String(target.domain || '').trim().toLowerCase();
+        const mappedPoolKey = domainPoolMapping?.[targetPoolKey] ?? domainPoolMapping?.[targetDomain] ?? domainPoolMapping?.[target.domain] ?? POOL_DEFAULT_KEY;
         const poolKey = isUserPoolKey(mappedPoolKey) ? mappedPoolKey : POOL_DEFAULT_KEY;
         report.poolKeyUsed = poolKey;
         report.poolDisplayName = getPoolDisplayName(poolKey, poolNames);
@@ -2542,6 +2543,7 @@ function renderAppStyles() {
         .input-group > :not(:first-child) { border-top-left-radius: 0 !important; border-bottom-left-radius: 0 !important; }
         .input-group > :not(:last-child) { border-top-right-radius: 0 !important; border-bottom-right-radius: 0 !important; }
         .input-group-sm > .form-control, .input-group-sm > .btn { font-size: .875rem; padding: .25rem .5rem; }
+        [hidden] { display: none !important; }
         textarea.form-control { min-height: calc(1.5em + .75rem + 2px); }
         /* ── Bootstrap replacement: Buttons ── */
         .btn { display: inline-block; text-align: center; vertical-align: middle; cursor: pointer; user-select: none; line-height: 1.5; font-size: 1rem; background: transparent; border: 1px solid transparent; color: inherit; text-decoration: none; }
@@ -2696,17 +2698,58 @@ function renderAppStyles() {
             max-width: 600px;
             margin-top: 12px;
         }
-        .domain-selector select {
-            border-radius: 12px;
-            padding: 12px 16px;
-            font-size: 1.1rem;
+        .target-summary {
+            display: block;
+            position: relative;
+            min-height: 76px;
+            padding: 14px 96px 14px 16px;
+            border: 1px solid #e5e5e7;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.9);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.06);
+            text-align: left;
+            cursor: pointer;
+            overflow: hidden;
+        }
+        .target-summary-domain {
+            display: block;
+            color: #1d1d1f;
+            font-size: 1.08rem;
+            font-weight: 800;
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+        }
+        .target-summary-meta {
+            display: block;
+            margin-top: 6px;
+            color: #6b7280;
+            font-size: .82rem;
             font-weight: 600;
-            border: 2px solid #e5e5e7;
+        }
+        .target-summary .record-badge {
+            position: absolute;
+            top: 12px;
+            right: 14px;
+            margin-left: 0;
+        }
+        .target-select-overlay {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            cursor: pointer;
         }
         @media (max-width: 768px) {
-            .domain-selector select {
-                font-size: 0.95rem;
-                padding: 10px 12px;
+            .target-summary {
+                min-height: 68px;
+                padding: 12px 86px 12px 12px;
+            }
+            .target-summary-domain {
+                font-size: 1rem;
+            }
+            .target-summary-meta {
+                font-size: .76rem;
             }
         }
         .card {
@@ -2960,9 +3003,6 @@ function renderAppStyles() {
             width: 160px;
             border-radius: 8px;
         }
-        .domain-binding-card {
-            overflow: hidden;
-        }
         .domain-binding-header {
             display: flex;
             align-items: center;
@@ -2970,23 +3010,23 @@ function renderAppStyles() {
             gap: 8px;
             cursor: pointer;
             margin-bottom: 0;
+            list-style: none;
         }
-        .domain-binding-card.is-expanded .domain-binding-header {
+        .domain-binding-header::-webkit-details-marker {
+            display: none;
+        }
+        .domain-binding-card[open] .domain-binding-header {
             margin-bottom: 1rem;
         }
         .domain-binding-header h6 {
             min-width: 0;
         }
         .domain-binding-table-wrap {
-            display: none;
             max-height: 280px;
             overflow: auto;
             border: 1px solid #e8edf5;
             border-radius: 12px;
             -webkit-overflow-scrolling: touch;
-        }
-        .domain-binding-card.is-expanded .domain-binding-table-wrap {
-            display: block;
         }
         .domain-binding-table-wrap::-webkit-scrollbar {
             width: 6px;
@@ -3027,6 +3067,30 @@ function renderAppStyles() {
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        .record-badge {
+            display: inline-flex;
+            align-items: center;
+            height: 18px;
+            margin-left: 8px;
+            padding: 0 6px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1;
+            letter-spacing: 0;
+            vertical-align: middle;
+            border: 1px solid transparent;
+        }
+        .record-badge-a {
+            color: #0b5cab;
+            background: #e8f2ff;
+            border-color: #b8d7ff;
+        }
+        .record-badge-txt {
+            color: #087443;
+            background: #e6f7ee;
+            border-color: #a8e3c3;
+        }
         .domain-binding-select {
             width: 100%;
             min-width: 0;
@@ -3048,7 +3112,6 @@ function renderAppStyles() {
             cursor: pointer;
         }
         .filter-help {
-            display: none;
             margin-top: 8px;
             padding: 10px 12px;
             border-radius: 10px;
@@ -3056,9 +3119,6 @@ function renderAppStyles() {
             color: #4b5563;
             font-size: 12px;
             line-height: 1.55;
-        }
-        .filter-help.active {
-            display: block;
         }
         .filter-preview {
             color: #6b7280;
@@ -3582,13 +3642,13 @@ function renderHero(C, kvReady) {
         🌐 DDNS Pro 多域名管理
     </h1>
     <div class="hero-actions">
-        <div class="guide-toggle" onclick="toggleGuide()" title="使用步骤提示">?</div>
+        <div class="guide-toggle" onclick="toggleHidden('usage-guide')" title="使用步骤提示">?</div>
         <div class="config-info">
             🧭 建议流程：导入IP → 检测 → 入库 → 执行维护
         </div>
     </div>
     ${kvReady ? '' : `<div class="kv-alert"><strong>KV 未绑定。</strong>请在 Worker Settings &gt; Bindings 中绑定 KV Namespace，变量名必须为 <code>IP_DATA</code>。未绑定前配置保存、IP 池、维护任务都不可用。</div>`}
-    <div id="usage-guide" class="usage-guide" style="display:none">
+    <div id="usage-guide" class="usage-guide" hidden>
         <ol>
             <li><strong>准备IP</strong>：在左侧 <code>IP库管理</code> 中手动输入或远程加载 IP，点击【⚡ 检测】筛出可用 IP。</li>
             <li><strong>保存到池</strong>：选择上方的 IP 池（默认为默认池），点击【💾 入库】将可用 IP 入库。</li>
@@ -3596,13 +3656,19 @@ function renderHero(C, kvReady) {
         </ol>
     </div>
     <div class="domain-selector">
-        <select id="domain-select" class="form-select" onchange="switchDomain()">
-            ${C.targets.map((t, i) => {
-                const modeLabel = {'A': 'A/AAAA', 'TXT': 'TXT'};
-                const label = `${t.domain} · ${modeLabel[t.mode] || t.mode}${t.mode !== 'TXT' ? ' · ' + t.port : ''}`;
-                return `<option value="${i}">${label}</option>`;
-            }).join('')}
-        </select>
+        <label class="target-summary">
+            <span id="current-target-summary-content">
+                <span class="target-summary-domain">未配置维护域名</span>
+                <span class="target-summary-meta">请先到配置中心添加</span>
+            </span>
+            <select id="domain-select" class="target-select-overlay" onchange="switchDomain()" aria-label="选择维护域名">
+                ${C.targets.map((t, i) => {
+                    const modeLabel = {'A': 'A/AAAA', 'TXT': 'TXT'};
+                    const label = `${t.domain} - ${modeLabel[t.mode] || t.mode}`;
+                    return `<option value="${i}">${escapeHTML(label)}</option>`;
+                }).join('')}
+            </select>
+        </label>
     </div>
 </div>
 `;
@@ -3642,8 +3708,8 @@ function renderConfigPage() {
             <summary class="config-details-summary">
                 <h6 class="m-0 fw-bold">⚙️ 基础配置</h6>
                 <div class="config-toolbar">
-                    <button id="btn-cancel-config" class="btn btn-sm btn-outline-secondary" onclick="event.preventDefault(); resetConfigDraft()" style="display:none">还原改动</button>
-                    <button id="btn-save-config" class="btn btn-sm btn-success config-save-btn" onclick="event.preventDefault(); saveAppConfig()" style="display:none">💾 保存到 KV</button>
+                    <button id="btn-cancel-config" class="btn btn-sm btn-outline-secondary" onclick="event.preventDefault(); resetConfigDraft()" hidden>还原改动</button>
+                    <button id="btn-save-config" class="btn btn-sm btn-success config-save-btn" onclick="event.preventDefault(); saveAppConfig()" hidden>💾 保存到 KV</button>
                 </div>
             </summary>
             <div class="config-details-body">
@@ -3754,12 +3820,12 @@ function renderDashboardPage() {
                     <div class="mb-2 filter-toolbar">
                         <div class="filter-line">
                             <input type="text" id="universal-filter" class="form-control form-control-sm" style="border-radius:8px" placeholder="筛选">
-                            <button class="filter-help-btn" onclick="toggleFilterHelp()" title="筛选用法">?</button>
+                            <button class="filter-help-btn" onclick="toggleHidden('filter-help')" title="筛选用法">?</button>
                             <button class="btn btn-sm btn-outline-success" onclick="smartFilter('keep')" title="保留匹配的IP">保留</button>
                             <button class="btn btn-sm btn-outline-danger" onclick="smartFilter('exclude')" title="排除匹配的IP">排除</button>
                             <button class="btn btn-sm btn-outline-secondary" onclick="quickDeduplicate()" title="去除重复IP">去重</button>
                         </div>
-                        <div id="filter-help" class="filter-help">
+                        <div id="filter-help" class="filter-help" hidden>
                             支持空格分隔条件：<code>port:443</code>、<code>port:443-2053</code>、<code>country:国家代码</code>、<code>asn:ASN编号</code>、普通关键词。空格表示“且”，竖线 <code>|</code> 表示“或”,例如 <code>country:KR asn:AS4766 | country:US</code>
                         </div>
                         <div id="filter-preview" class="filter-preview">输入条件后会显示匹配数量。</div>
@@ -3777,7 +3843,7 @@ function renderDashboardPage() {
                     </div>
 
                     <!-- 垃圾桶专用操作 -->
-                    <div id="trash-actions" style="display:none" class="mt-2">
+                    <div id="trash-actions" class="mt-2" hidden>
                         <div class="row g-2">
                             <div class="col-6">
                                 <button class="btn btn-outline-success btn-sm w-100" onclick="restoreSelected()">♻️ 恢复选中</button>
@@ -3791,11 +3857,11 @@ function renderDashboardPage() {
             </div>
 
             <!-- 域名池绑定 -->
-            <div id="domain-binding-card" class="card p-4 mb-3 domain-binding-card">
-                <div class="domain-binding-header" onclick="toggleDomainBindingPanel()" title="点击展开/折叠域名池绑定">
+            <details id="domain-binding-card" class="card p-4 mb-3 domain-binding-card">
+                <summary class="domain-binding-header" title="点击展开/折叠域名池绑定">
                     <h6 class="m-0 fw-bold">🔗 域名池绑定</h6>
-                    <button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); loadDomainPoolMapping()" title="刷新">🔄</button>
-                </div>
+                    <button class="btn btn-sm btn-outline-primary" onclick="event.preventDefault(); event.stopPropagation(); loadDomainPoolMapping()" title="刷新">🔄</button>
+                </summary>
                 <div class="domain-binding-table-wrap">
                     <table class="table table-sm">
                         <thead>
@@ -3809,7 +3875,7 @@ function renderDashboardPage() {
                         </tbody>
                     </table>
                 </div>
-            </div>
+            </details>
 
         </div>
 
@@ -3841,11 +3907,6 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
     const CONFIG_TEXT_FIELDS = ${JSON.stringify(CONFIG_TEXT_FIELDS.map(({ key, id }) => [key, id]))};
     const CONFIG_NUMBER_FIELDS = ${JSON.stringify(CONFIG_NUMBER_FIELDS.map(({ key, id }) => [key, id]))};
     const CONFIG_TOGGLE_FIELDS = ${JSON.stringify(CONFIG_TOGGLE_FIELDS.map(({ key, id, fallback }) => [key, id, fallback]))};
-    const CONFIG_FIELD_IDS = [
-        ...CONFIG_TEXT_FIELDS.map(([, id]) => id),
-        ...CONFIG_NUMBER_FIELDS.map(([, id]) => id),
-        ...CONFIG_TOGGLE_FIELDS.map(([, id]) => id)
-    ];
     let currentTargetIndex = 0;
     const POOL_DEFAULT_KEY = '${POOL_DEFAULT_KEY}';
     const POOL_TRASH_KEY = '${POOL_TRASH_KEY}';
@@ -3858,8 +3919,6 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
     let configDraft = null;
     let configSavedSnapshot = null;
     let configDirty = false;
-    let domainBindingExpanded = false;
-
     // 检测中断状态
     let pausedCheckState = null; // { uncheckedLines: [], validIPs: [], total: number }
 
@@ -3927,6 +3986,25 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         return String(a || '').localeCompare(String(b || ''), 'zh-CN', { numeric: true });
     }
 
+    function getBoundPoolForTarget(target = {}) {
+        const key = getTargetDuplicateKey(target);
+        const domain = String(target.domain || '').trim().toLowerCase();
+        return domainPoolMapping[key] || domainPoolMapping[domain] || domainPoolMapping[target.domain] || POOL_DEFAULT_KEY;
+    }
+
+    function renderTargetSummary(target = {}) {
+        if (!target.domain) {
+            return '<span class="target-summary-domain">未配置维护域名</span><span class="target-summary-meta">请先到配置中心添加</span>';
+        }
+        const mode = target.mode === 'TXT' ? 'TXT' : 'A';
+        const modeLabel = MODE_LABELS[mode] || mode;
+        const port = String(target.port || '').trim();
+        const meta = mode !== 'TXT' && port && port !== 'any' ? '端口 ' + port : modeLabel + ' 记录';
+        return '<span class="record-badge record-badge-' + mode.toLowerCase() + '">' + escapeHTML(modeLabel) + '</span>' +
+            '<span class="target-summary-domain">' + escapeHTML(target.domain) + '</span>' +
+            '<span class="target-summary-meta">' + escapeHTML(meta) + '</span>';
+    }
+
     function applyPoolState(state = {}) {
         domainPoolMapping = state.mapping && typeof state.mapping === 'object' && !Array.isArray(state.mapping) ? state.mapping : {};
         availablePools = Array.isArray(state.pools) && state.pools.length ? state.pools : [POOL_DEFAULT_KEY, POOL_TRASH_KEY];
@@ -3981,14 +4059,10 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         document.querySelectorAll('.nav-tab').forEach(el => el.classList.toggle('active', el.dataset.page === page));
     }
 
-    function updateConfigActionButtons() {
-        const saveBtn = document.getElementById('btn-save-config');
-        const cancelBtn = document.getElementById('btn-cancel-config');
-        const display = configDirty ? 'inline-block' : 'none';
-        if (saveBtn) saveBtn.style.display = display;
-        if (cancelBtn) cancelBtn.style.display = display;
+    function toggleHidden(id) {
+        const el = document.getElementById(id);
+        if (el) el.hidden = !el.hidden;
     }
-
 
     function resetConfigDraft() {
         loadAppConfigToForm(configSavedSnapshot || INITIAL_APP_CONFIG, false);
@@ -3997,29 +4071,16 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         showToast('已还原未保存改动');
     }
 
-    function bindConfigGlobalChangeHandlers() {
-        CONFIG_FIELD_IDS.forEach(id => {
-            const el = document.getElementById(id);
-            if (!el || el.dataset.dirtyBound) return;
-            el.dataset.dirtyBound = '1';
-            el.addEventListener('change', () => markConfigDirty('基础配置已保存到页面，点击“保存到 KV”后生效'));
-            el.addEventListener('input', () => markConfigDirty());
-        });
-    }
-
     function cloneConfig(config) {
         return JSON.parse(JSON.stringify(config || {}));
     }
 
-    function markConfigDirty(message) {
-        configDirty = true;
-        updateConfigActionButtons();
+    function setConfigDirty(dirty, message) {
+        configDirty = dirty;
+        document.querySelectorAll('#btn-save-config,#btn-cancel-config').forEach(btn => {
+            btn.hidden = !configDirty;
+        });
         if (message) showToast(message, 'info');
-    }
-
-    function clearConfigDirty() {
-        configDirty = false;
-        updateConfigActionButtons();
     }
 
     // ===== Config center =====
@@ -4207,7 +4268,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         configDraft.zones = nextZones;
         renderConfigCards();
         closeConfigEditor('zone');
-        markConfigDirty('权限配置已保存到页面，点击“保存到 KV”后生效');
+        setConfigDirty(true, '权限配置已保存到页面，点击“保存到 KV”后生效');
     }
 
     function deleteZoneConfig(index) {
@@ -4221,7 +4282,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         }));
         renderConfigCards();
         closeConfigEditor('zone');
-        markConfigDirty('权限配置已保存到页面，点击“保存到 KV”后生效');
+        setConfigDirty(true, '权限配置已保存到页面，点击“保存到 KV”后生效');
     }
 
     function closeConfigEditor(type) {
@@ -4285,9 +4346,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
             if (el) el.checked = config[key] === undefined ? fallback : config[key] !== false;
         });
         renderConfigCards();
-        bindConfigGlobalChangeHandlers();
-        clearConfigDirty();
-        updateConfigActionButtons();
+        setConfigDirty(false);
     }
 
     function collectTargetConfigRows() {
@@ -4399,7 +4458,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         configDraft.targets = nextTargets;
         renderConfigCards();
         closeConfigEditor('target');
-        markConfigDirty('管理域名已保存到页面，点击“保存到 KV”后生效');
+        setConfigDirty(true, '管理域名已保存到页面，点击“保存到 KV”后生效');
     }
 
     function deleteTargetConfig(index) {
@@ -4409,7 +4468,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         configDraft.targets = targets;
         renderConfigCards();
         closeConfigEditor('target');
-        markConfigDirty('管理域名已保存到页面，点击“保存到 KV”后生效');
+        setConfigDirty(true, '管理域名已保存到页面，点击“保存到 KV”后生效');
     }
 
     function toggleTargetEnabled(index, enabled) {
@@ -4418,7 +4477,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         targets[index].enabled = enabled;
         configDraft.targets = targets;
         renderConfigCards();
-        markConfigDirty(enabled ? '已开启该域名维护，点击“保存到 KV”后生效' : '已关闭该域名维护，点击“保存到 KV”后生效');
+        setConfigDirty(true, enabled ? '已开启该域名维护，点击“保存到 KV”后生效' : '已关闭该域名维护，点击“保存到 KV”后生效');
     }
 
     async function saveAppConfig() {
@@ -4465,8 +4524,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
             configDraft = savedConfig;
             configSavedSnapshot = cloneConfig(savedConfig);
             SETTINGS = configDraft.settings || SETTINGS;
-            clearConfigDirty();
-            updateConfigActionButtons();
+            setConfigDirty(false);
             renderConfigCards();
             log('✅ 配置已保存到 KV，刷新页面后生效', 'success');
             showToast('配置已保存到 KV');
@@ -4479,12 +4537,11 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
             if (btn) {
                 btn.disabled = false;
                 btn.textContent = '💾 保存到 KV';
-                btn.style.display = configDirty ? 'inline-block' : 'none';
             }
             if (cancelBtn) {
                 cancelBtn.disabled = false;
-                cancelBtn.style.display = configDirty ? 'inline-block' : 'none';
             }
+            setConfigDirty(configDirty);
         }
     }
 
@@ -4624,12 +4681,6 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         return null;
     }
 
-    function toggleGuide() {
-        const box = document.getElementById('usage-guide');
-        if (!box) return;
-        box.style.display = box.style.display === 'none' || box.style.display === '' ? 'block' : 'none';
-    }
-
     function formatIPInfo(ipInfo) {
         if (!ipInfo) return '';
 
@@ -4758,17 +4809,21 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         if (!TARGETS.length) {
             const manualSection = document.getElementById('manual-add-section');
             const t = document.getElementById('status-table');
-            if (manualSection) manualSection.style.display = 'none';
+            const summary = document.getElementById('current-target-summary-content');
+            if (manualSection) manualSection.hidden = true;
+            if (summary) summary.innerHTML = renderTargetSummary();
             if (t) t.innerHTML = '<tr><td colspan="6" class="text-secondary p-4">请先到配置中心添加管理域名</td></tr>';
             log('请先在配置中心添加管理域名', 'warn');
             return;
         }
         currentTargetIndex = parseInt(document.getElementById('domain-select').value);
         const target = TARGETS[currentTargetIndex];
+        const summary = document.getElementById('current-target-summary-content');
+        if (summary) summary.innerHTML = renderTargetSummary(target);
         log(\`切换到: \${target.domain} (\${target.mode})\`);
 
         const manualSection = document.getElementById('manual-add-section');
-        manualSection.style.display = 'block';
+        if (manualSection) manualSection.hidden = false;
 
         refreshStatus();
     }
@@ -5416,27 +5471,20 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         selector.value = currentPool;
     }
 
-    function setDomainBindingExpanded(expanded) {
-        domainBindingExpanded = Boolean(expanded);
-        const card = document.getElementById('domain-binding-card');
-        if (card) card.classList.toggle('is-expanded', domainBindingExpanded);
-    }
-
-    function toggleDomainBindingPanel() {
-        setDomainBindingExpanded(!domainBindingExpanded);
-    }
-
     function updateDomainBindingTable() {
         const tbody = document.getElementById('domain-binding-list');
         if (!tbody) return;
-        const domains = TARGETS.map(t => t.domain);
-        if (domains.length === 0) {
+        if (TARGETS.length === 0) {
             tbody.innerHTML = '<tr><td colspan="2" class="text-center text-secondary">请先到配置中心添加管理域名</td></tr>';
             return;
         }
 
-        tbody.innerHTML = domains.map(domain => {
-            const boundPool = domainPoolMapping[domain] || POOL_DEFAULT_KEY;
+        tbody.innerHTML = TARGETS.map(target => {
+            const bindingKey = getTargetDuplicateKey(target);
+            const boundPool = getBoundPoolForTarget(target);
+            const mode = target.mode === 'TXT' ? 'TXT' : 'A';
+            const modeLabel = MODE_LABELS[mode] || mode;
+            const badgeClass = 'record-badge-' + mode.toLowerCase();
 
             const selectablePools = (Array.isArray(availablePools) ? availablePools : [POOL_DEFAULT_KEY])
                 .filter(p => p !== POOL_TRASH_KEY);
@@ -5448,10 +5496,14 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
 
             return \`
                 <tr>
-                    <td><code class="domain-binding-domain" title="\${escapeHTML(domain)}">\${escapeHTML(domain)}</code></td>
+                    <td>
+                        <span class="domain-binding-domain" title="\${escapeHTML(target.domain || '')}">
+                            \${escapeHTML(target.domain || '')}<span class="record-badge \${badgeClass}">\${escapeHTML(modeLabel)}</span>
+                        </span>
+                    </td>
                     <td>
                         <select class="form-select form-select-sm domain-binding-select"
-                                onchange="bindDomainToPool('\${escapeJSString(domain)}', this.value)">
+                                onchange="bindDomainToPool('\${escapeJSString(bindingKey)}', this.value)">
                             \${options}
                         </select>
                     </td>
@@ -5559,20 +5611,19 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         log(\`📦 切换到: \${getPoolName(currentPool)}\`, 'info');
 
         const trashActions = document.getElementById('trash-actions');
-        if (trashActions) {
-            if (currentPool === POOL_TRASH_KEY) {
-                trashActions.style.display = 'block';
-            } else {
-                trashActions.style.display = 'none';
-            }
-        }
+        if (trashActions) trashActions.hidden = currentPool !== POOL_TRASH_KEY;
 
         showPoolInfo();
     }
 
-    async function bindDomainToPool(domain, poolKey) {
-        const oldPool = domainPoolMapping[domain] || POOL_DEFAULT_KEY;
+    async function bindDomainToPool(bindingKey, poolKey) {
+        const target = TARGETS.find(item => getTargetDuplicateKey(item) === bindingKey);
+        const mode = target?.mode === 'TXT' ? 'TXT' : 'A';
+        const modeLabel = target ? (MODE_LABELS[mode] || mode) : '';
+        const domain = target ? target.domain + ' (' + modeLabel + ')' : bindingKey;
+        const oldPool = target ? getBoundPoolForTarget(target) : (domainPoolMapping[bindingKey] || POOL_DEFAULT_KEY);
         if (oldPool === poolKey) return;
+        const oldMapping = { ...domainPoolMapping };
         const oldName = getPoolName(oldPool);
         const newName = getPoolName(poolKey);
         const message = [
@@ -5587,12 +5638,12 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
             updateDomainBindingTable();
             return;
         }
-        domainPoolMapping[domain] = poolKey;
+        domainPoolMapping[bindingKey] = poolKey;
 
         try {
             const r = await apiPostJson('/api/save-domain-pool-mapping', { mapping: domainPoolMapping });
             if (!r.success) {
-                domainPoolMapping[domain] = oldPool;
+                domainPoolMapping = oldMapping;
                 updateDomainBindingTable();
                 log(\`❌ 绑定失败: \${r.error || '未知错误'}\`, 'error');
                 return;
@@ -5601,7 +5652,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
 
             log(\`✅ \${domain} → \${getPoolName(poolKey)}\`, 'success');
         } catch (e) {
-            domainPoolMapping[domain] = oldPool;
+            domainPoolMapping = oldMapping;
             updateDomainBindingTable();
             log('❌ 绑定失败', 'error');
         }
@@ -5873,11 +5924,6 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         preview.innerHTML = \`当前输入 <strong>\${lines.length}</strong> 条，匹配 <strong>\${matched}</strong> 条。\`;
     }
 
-    function toggleFilterHelp() {
-        const el = document.getElementById('filter-help');
-        if (el) el.classList.toggle('active');
-    }
-
     function parsePortFilter(portStr) {
         const parts = portStr.split(',').map(p => p.trim()).filter(p => p);
         const result = [];
@@ -5907,6 +5953,8 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         log('🚀 系统就绪', 'success');
         log(\`⚙️ 配置: 并发\${SETTINGS.CONCURRENT_CHECKS} | 超时\${SETTINGS.CHECK_TIMEOUT}ms\`, 'info');
         loadAppConfigToForm(INITIAL_APP_CONFIG);
+        const configBody = document.querySelector('.config-details-body');
+        ['input', 'change'].forEach(type => configBody?.addEventListener(type, () => setConfigDirty(true, type === 'change' ? '基础配置已保存到页面，点击“保存到 KV”后生效' : '')));
         ['ip-input', 'universal-filter'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('input', updateFilterPreview);
