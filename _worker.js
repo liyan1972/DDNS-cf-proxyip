@@ -4,7 +4,7 @@
 
 // ==================== Editable configuration ====================
 // Change these values first when tuning runtime behavior.
-const APP_VERSION = '2026.05.19-22.59';
+const APP_VERSION = '2026.05.22-12.37';
 const APP_CONFIG_KEY = 'app_config';
 
 const GLOBAL_SETTINGS = {
@@ -30,24 +30,60 @@ const SETTING_LIMITS = {
     MAX_TRASH_SIZE: { min: 0, max: 100000 }
 };
 
+const CONFIG_TEXT_FIELDS = [
+    { key: 'checkApi', id: 'cfg-check-api', label: '检测 API', help: '主检测接口，支持 {proxyip} 占位符。', placeholder: 'CHECK_API', span: 2 },
+    { key: 'checkApiBackup', id: 'cfg-check-api-backup', label: '备用检测 API', help: '主接口失败或返回不可用时用于复检，可留空。', placeholder: 'CHECK_API_BACKUP', span: 2 },
+    { key: 'dohApi', id: 'cfg-doh-api', label: 'DoH API', help: '域名解析查询接口。', placeholder: 'DOH_API' },
+    { key: 'authKey', id: 'cfg-auth-key', label: '面板密钥', help: '为空则关闭前端鉴权。', placeholder: 'AUTH_KEY' },
+    { key: 'tgToken', id: 'cfg-tg-token', label: 'TG Bot Token', help: '开启 TG 通知时必填。', placeholder: 'TG_TOKEN' },
+    { key: 'tgId', id: 'cfg-tg-id', label: 'TG Chat ID', help: '通知接收账号或群组 ID。', placeholder: 'TG_ID' }
+];
+
+const CONFIG_NUMBER_FIELDS = [
+    { key: 'CONCURRENT_CHECKS', id: 'cfg-concurrent-checks', label: '检测并发', help: '前端批量检测并发数。', placeholder: '32' },
+    { key: 'CHECK_TIMEOUT', id: 'cfg-check-timeout', label: '检测超时(ms)', help: '单个检测接口请求超时。', placeholder: '3000' },
+    { key: 'REMOTE_LOAD_TIMEOUT', id: 'cfg-remote-timeout', label: '远程加载超时(ms)', help: '远程 TXT URL 加载。', placeholder: '5000' },
+    { key: 'DOH_TIMEOUT', id: 'cfg-doh-timeout', label: 'DoH超时(ms)', help: 'DNS over HTTPS 查询。', placeholder: '5000' },
+    { key: 'DEFAULT_MIN_ACTIVE', id: 'cfg-default-min-active', label: '默认活跃数', help: '新增管理域名默认值。', placeholder: '3' },
+    { key: 'MAX_TRASH_SIZE', id: 'cfg-max-trash-size', label: '垃圾桶上限', help: '超过后保留最新条目。', placeholder: '1000' }
+];
+
+const CONFIG_TOGGLE_FIELDS = [
+    { key: 'scheduledEnabled', id: 'cfg-scheduled-enabled', label: '自动维护', fallback: true, env: 'SCHEDULED_ENABLED' },
+    { key: 'tgEnabled', id: 'cfg-tg-enabled', label: 'TG通知', fallback: true, env: 'TG_ENABLED' }
+];
+
+const CONFIG_TEXT_KEYS = CONFIG_TEXT_FIELDS.map(({ key }) => key);
+
+const ENV_STRING_CONFIG_FIELDS = [
+    ['apiKey', 'CF_KEY'],
+    ['zoneId', 'CF_ZONEID'],
+    ['authKey', 'AUTH_KEY'],
+    ['tgToken', 'TG_TOKEN'],
+    ['tgId', 'TG_ID'],
+    ['checkApi', 'CHECK_API'],
+    ['checkApiBackup', 'CHECK_API_BACKUP'],
+    ['dohApi', 'DOH_API']
+];
+
 // ==================== 默认配置（环境变量未设置时使用） ====================
 const DEFAULT_CONFIG = {
     // 目标维护域名的Cloudflare 配置
     apiKey: '',              // CF_KEY: Cloudflare API Token
     zoneId: '',              // CF_ZONEID: Cloudflare Zone ID
     zones: [],               // app_config.zones: 多套基础域名 + CF 凭据
-    
+
     // 目标维护域名的配置
     targets: [],             // app_config.targets: 配置中心保存的维护目标
-    
+
     // Telegram 通知配置
     tgToken: '',             // TG_TOKEN: Telegram Bot Token
     tgId: '',                // TG_ID: Telegram Chat ID
-    
+
     // 检测 API 配置
     checkApi: 'https://api.090227.xyz/check?proxyip=',  // CHECK_API: ProxyIP 检测接口
     checkApiBackup: '',      // CHECK_API_BACKUP: 备用检测接口
-    
+
     // DNS 配置
     dohApi: 'https://cloudflare-dns.com/dns-query',  // DOH_API: DNS over HTTPS 接口
     // 访问控制配置
@@ -55,7 +91,7 @@ const DEFAULT_CONFIG = {
     scheduledEnabled: true,   // SCHEDULED_ENABLED: 定时维护开关
     tgEnabled: true,          // TG_ENABLED: Telegram 通知开关
     settings: GLOBAL_SETTINGS,
-    
+
     // 运行时配置（非环境变量）
     projectUrl: ''           // 项目URL（自动获取）
 };
@@ -296,6 +332,15 @@ const badRequest = data => jsonResponse(data, 400);
 const serverError = data => jsonResponse(data, 500);
 const readJsonBody = async req => { try { return await req.json(); } catch { return null; } };
 const hasKVBinding = env => Boolean(env?.IP_DATA && typeof env.IP_DATA.get === 'function' && typeof env.IP_DATA.put === 'function');
+const badJsonBody = () => badRequest({ success: false, error: '请求体不是有效JSON' });
+
+const withJsonBody = handler => async (url, request, env, config) => {
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return badJsonBody();
+    }
+    return handler(body, url, env, config, request);
+};
 
 function parseCookieHeader(cookieHeader) {
     const out = {};
@@ -446,39 +491,46 @@ export default {
 
 // ==================== API routes ====================
 
+const withUrlEnv = handler => (url, request, env) => handler(url, env);
+const withUrlConfig = handler => (url, request, env, config) => handler(url, config);
+const withUrlEnvConfig = handler => (url, request, env, config) => handler(url, env, config);
+const withEnv = handler => (url, request, env) => handler(env);
+const withConfig = handler => (url, request, env, config) => handler(config);
+const withJsonEnv = handler => withJsonBody((body, url, env) => handler(body, env));
+const withJsonConfig = handler => withJsonBody((body, url, env, config) => handler(body, config));
+
+const GET_API_ROUTES = {
+    '/api/get-pool': withUrlEnv(handleGetPool),
+    '/api/current-status': withUrlConfig(handleCurrentStatus),
+    '/api/lookup-domain': withUrlConfig(handleLookupDomain),
+    '/api/check-ip': withUrlConfig(handleCheckIP),
+    '/api/get-domain-pool-mapping': withEnv(handleGetDomainPoolMapping),
+    '/api/get-config': withConfig(handleGetConfig)
+};
+
+const POST_API_ROUTES = {
+    '/api/save-pool': withJsonEnv(handleSavePool),
+    '/api/load-remote-url': withJsonConfig(handleLoadRemoteUrl),
+    '/api/delete-record': withUrlConfig(handleDeleteRecord),
+    '/api/add-a-record': withJsonConfig(handleAddARecord),
+    '/api/maintain': withUrlEnvConfig(handleMaintain),
+    '/api/save-domain-pool-mapping': withJsonEnv(handleSaveDomainPoolMapping),
+    '/api/create-pool': withJsonEnv(handleCreatePool),
+    '/api/rename-pool': withJsonEnv(handleRenamePool),
+    '/api/delete-pool': withUrlEnv(handleDeletePool),
+    '/api/clear-trash': withEnv(handleClearTrash),
+    '/api/restore-from-trash': withJsonEnv(handleRestoreFromTrash),
+    '/api/save-config': withJsonEnv(handleSaveConfig)
+};
+
 const API_ROUTES = {
-    '/api/get-pool': (url, req, env, config) => handleGetPool(url, env),
-    '/api/save-pool': (url, req, env, config) => handleSavePool(req, env),
-    '/api/load-remote-url': (url, req, env, config) => handleLoadRemoteUrl(req, config),
-    '/api/current-status': (url, req, env, config) => handleCurrentStatus(url, config),
-    '/api/lookup-domain': (url, req, env, config) => handleLookupDomain(url, config),
-    '/api/check-ip': (url, req, env, config) => handleCheckIP(url, config),
-    '/api/delete-record': (url, req, env, config) => handleDeleteRecord(url, config),
-    '/api/add-a-record': (url, req, env, config) => handleAddARecord(req, config),
-    '/api/maintain': (url, req, env, config) => handleMaintain(url, env, config),
-    '/api/get-domain-pool-mapping': (url, req, env, config) => handleGetDomainPoolMapping(env),
-    '/api/save-domain-pool-mapping': (url, req, env, config) => handleSaveDomainPoolMapping(req, env),
-    '/api/create-pool': (url, req, env, config) => handleCreatePool(req, env),
-    '/api/rename-pool': (url, req, env, config) => handleRenamePool(req, env),
-    '/api/delete-pool': (url, req, env, config) => handleDeletePool(url, env),
-    '/api/clear-trash': (url, req, env, config) => handleClearTrash(env),
-    '/api/restore-from-trash': (url, req, env, config) => handleRestoreFromTrash(req, env),
-    '/api/get-config': (url, req, env, config) => handleGetConfig(config),
-    '/api/save-config': (url, req, env, config) => handleSaveConfig(req, env)
+    ...GET_API_ROUTES,
+    ...POST_API_ROUTES
 };
 
 // ==================== API handlers ====================
 
-const POST_ONLY_ROUTES = new Set([
-    '/api/save-pool', '/api/load-remote-url', '/api/add-a-record',
-    '/api/save-domain-pool-mapping', '/api/create-pool', '/api/clear-trash',
-    '/api/restore-from-trash',
-    '/api/delete-record',
-    '/api/rename-pool',
-    '/api/delete-pool', 
-    '/api/maintain',
-    '/api/save-config'
-]);
+const POST_ONLY_ROUTES = new Set(Object.keys(POST_API_ROUTES));
 
 async function handleAPIRequest(url, request, env, config) {
     if (POST_ONLY_ROUTES.has(url.pathname) && request.method !== 'POST') {
@@ -498,19 +550,15 @@ async function handleGetPool(url, env) {
 
     const pool = await env.IP_DATA.get(poolKey) || '';
     const count = pool.trim() ? pool.trim().split('\n').length : 0;
-    
+
     if (onlyCount) {
         return jsonResponse({ count });
     }
     return jsonResponse({ pool, count });
 }
 
-async function handleSavePool(request, env) {
+async function handleSavePool(body, env) {
     await ensurePoolDefaults(env);
-    const body = await readJsonBody(request);
-    if (!body) {
-        return badRequest({ success: false, error: '请求体不是有效JSON' });
-    }
     const poolKey = body.poolKey || POOL_DEFAULT_KEY;
     const mode = body.mode || 'append'; // append: 追加, replace: 覆盖, remove: 删除
     if (!isWritablePoolKey(poolKey)) {
@@ -590,18 +638,14 @@ async function handleSavePool(request, env) {
     return jsonResponse(responseData);
 }
 
-async function handleLoadRemoteUrl(request, config) {
-    const body = await readJsonBody(request);
-    if (!body) {
-        return badRequest({ success: false, error: '请求体不是有效JSON' });
-    }
+async function handleLoadRemoteUrl(body, config) {
     const url = body.url;
     if (!url) {
         return badRequest({ success: false, error: '缺少URL' });
     }
     const ips = await loadFromRemoteUrl(url, config);
-    return jsonResponse({ 
-        success: true, 
+    return jsonResponse({
+        success: true,
         ips,
         count: ips ? ips.split('\n').length : 0
     });
@@ -671,17 +715,13 @@ async function handleDeleteRecord(url, config) {
             ? jsonResponse({ success: true })
             : jsonResponse({ success: false, error: 'CF API 更新失败' });
     }
-    
+
     return await deleteDNSRecord(cfConfig, id)
         ? jsonResponse({ success: true })
         : jsonResponse({ success: false, error: 'CF API 删除失败' });
 }
 
-async function handleAddARecord(request, config) {
-    const body = await readJsonBody(request);
-    if (!body) {
-        return badRequest({ success: false, error: '请求体不是有效JSON' });
-    }
+async function handleAddARecord(body, config) {
     const ip = body.ip;
     const targetIndex = body.targetIndex || 0;
     const target = config.targets[targetIndex];
@@ -745,12 +785,8 @@ async function handleGetDomainPoolMapping(env) {
     return jsonResponse(await getPoolState(env));
 }
 
-async function handleSaveDomainPoolMapping(request, env) {
+async function handleSaveDomainPoolMapping(body, env) {
     await ensurePoolDefaults(env);
-    const body = await readJsonBody(request);
-    if (!body) {
-        return badRequest({ success: false, error: '请求体不是有效JSON' });
-    }
     const mapping = body.mapping && typeof body.mapping === 'object' && !Array.isArray(body.mapping)
         ? Object.fromEntries(Object.entries(body.mapping)
             .filter(([, poolKey]) => isUserPoolKey(poolKey)))
@@ -759,14 +795,10 @@ async function handleSaveDomainPoolMapping(request, env) {
     return jsonResponse({ success: true, ...(await getPoolState(env)) });
 }
 
-async function handleCreatePool(request, env) {
+async function handleCreatePool(body, env) {
     await ensurePoolDefaults(env);
-    const body = await readJsonBody(request);
-    if (!body) {
-        return badRequest({ success: false, error: '请求体不是有效JSON' });
-    }
     const displayName = String(body.displayName || '').trim();
-    
+
     if (!displayName) {
         return badRequest({ success: false, error: '请输入池显示名称' });
     }
@@ -791,13 +823,8 @@ async function handleCreatePool(request, env) {
     return jsonResponse({ success: true, poolKey, displayName, ...(await getPoolState(env)) });
 }
 
-async function handleRenamePool(request, env) {
+async function handleRenamePool(body, env) {
     await ensurePoolDefaults(env);
-    const body = await readJsonBody(request);
-    if (!body) {
-        return badRequest({ success: false, error: '请求体不是有效JSON' });
-    }
-
     const poolKey = body.poolKey || POOL_DEFAULT_KEY;
     const displayName = String(body.displayName || '').trim();
     if (!isUserPoolKey(poolKey)) {
@@ -826,11 +853,11 @@ async function handleRenamePool(request, env) {
 async function handleDeletePool(url, env) {
     await ensurePoolDefaults(env);
     const poolKey = url.searchParams.get('poolKey') || '';
-    
+
     if (!poolKey) {
         return badRequest({ success: false, error: '缺少poolKey参数' });
     }
-    
+
     if (poolKey === POOL_DEFAULT_KEY || poolKey === POOL_TRASH_KEY || !isUserPoolKey(poolKey)) {
         return badRequest({ success: false, error: `不能删除${getPoolFixedName(poolKey)}` });
     }
@@ -839,7 +866,7 @@ async function handleDeletePool(url, env) {
     if (existing === null) {
         return badRequest({ success: false, error: '池不存在' });
     }
-    
+
     try {
         await env.IP_DATA.delete(poolKey);
         const poolNames = await readPoolDisplayNames(env);
@@ -867,12 +894,8 @@ async function handleClearTrash(env) {
     return jsonResponse({ success: true, message: '垃圾桶已清空' });
 }
 
-async function handleRestoreFromTrash(request, env) {
+async function handleRestoreFromTrash(body, env) {
     await ensurePoolDefaults(env);
-    const body = await readJsonBody(request);
-    if (!body) {
-        return badRequest({ success: false, error: '请求体不是有效JSON' });
-    }
     const ipsToRestore = body.ips || [];
     const restoreToSource = body.restoreToSource === true;
     const targetPool = body.targetPool || POOL_DEFAULT_KEY;
@@ -882,14 +905,14 @@ async function handleRestoreFromTrash(request, env) {
     if (!isUserPoolKey(targetPool)) {
         return badRequest({ success: false, error: '无效的目标池' });
     }
-    
+
     if (ipsToRestore.length === 0) {
         return badRequest({ success: false, error: '没有选择IP' });
     }
-    
+
     // 获取垃圾桶
     let trashList = parsePoolList(await env.IP_DATA.get(POOL_TRASH_KEY));
-    
+
     let restored = 0;
     const restoredByPool = {};
     const poolNames = await readPoolDisplayNames(env);
@@ -920,7 +943,7 @@ async function handleRestoreFromTrash(request, env) {
         }
         return POOL_DEFAULT_KEY;
     }
-    
+
     // 建立垃圾桶索引，避免循环内反复遍历
     const trashMap = new Map();
     trashList.forEach(t => trashMap.set(extractIPKey(t), t));
@@ -973,9 +996,9 @@ async function handleRestoreFromTrash(request, env) {
     const restoreSummary = restoredByPoolDisplay
         .map(item => `${item.label} ${item.count} 个`)
         .join('，');
-    
-    return jsonResponse({ 
-        success: true, 
+
+    return jsonResponse({
+        success: true,
         restored,
         restoredByPool,
         restoredByPoolDisplay,
@@ -991,14 +1014,8 @@ function getEditableConfig(config) {
         zoneId: config.zoneId || '',
         zones: config.zones || [],
         targets: config.targets || [],
-        tgToken: config.tgToken || '',
-        tgId: config.tgId || '',
-        tgEnabled: config.tgEnabled !== false,
-        checkApi: config.checkApi || '',
-        checkApiBackup: config.checkApiBackup || '',
-        dohApi: config.dohApi || '',
-        authKey: config.authKey || '',
-        scheduledEnabled: config.scheduledEnabled !== false,
+        ...Object.fromEntries(CONFIG_TEXT_KEYS.map(key => [key, config[key] || ''])),
+        ...Object.fromEntries(CONFIG_TOGGLE_FIELDS.map(({ key }) => [key, config[key] !== false])),
         settings: getRuntimeSettings(config)
     };
 }
@@ -1009,16 +1026,51 @@ async function handleGetConfig(config) {
     return jsonResponse({ success: true, config: getEditableConfig(config) });
 }
 
-async function handleSaveConfig(request, env) {
-    const body = await readJsonBody(request);
-    if (!body || typeof body !== 'object') {
-        return badRequest({ success: false, error: '请求体不是有效JSON' });
-    }
-
+async function handleSaveConfig(body, env) {
     const rawConfig = body.config && typeof body.config === 'object' ? body.config : body;
     const normalized = normalizeSavedConfig(rawConfig);
+    const duplicateError = getConfigDuplicateError(normalized);
+    if (duplicateError) {
+        return badRequest({ success: false, error: duplicateError });
+    }
     await env.IP_DATA.put(APP_CONFIG_KEY, JSON.stringify(normalized));
     return jsonResponse({ success: true, config: normalized });
+}
+
+function normalizeConfigCompareValue(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function findDuplicateConfigValue(items, keyFn) {
+    const seen = new Set();
+    for (const item of items || []) {
+        const key = normalizeConfigCompareValue(keyFn(item));
+        if (!key) continue;
+        if (seen.has(key)) return key;
+        seen.add(key);
+    }
+    return '';
+}
+
+function getTargetDuplicateKey(target = {}) {
+    const domain = normalizeConfigCompareValue(target.domain);
+    const mode = normalizeTargetMode(target.mode);
+    return domain ? `${domain}|${mode}` : '';
+}
+
+function getConfigDuplicateError(config = {}) {
+    const duplicateBaseDomain = findDuplicateConfigValue(config.zones, zone => zone.baseDomain);
+    if (duplicateBaseDomain) {
+        return `权限配置存在重复目标维护域名：${duplicateBaseDomain}`;
+    }
+
+    const duplicateTarget = findDuplicateConfigValue(config.targets, getTargetDuplicateKey);
+    if (duplicateTarget) {
+        const [domain, mode] = duplicateTarget.split('|');
+        return `管理域名存在重复项：${domain} / ${mode === 'TXT' ? 'TXT' : 'A/AAAA'}`;
+    }
+
+    return '';
 }
 
 function parseDomainPort(input, defaultPort = '443') {
@@ -1109,9 +1161,9 @@ function normalizeZoneConfig(zone) {
     const baseDomain = String(zone.baseDomain || zone.domain || '').trim().replace(/^\.+|\.+$/g, '');
     const zoneId = String(zone.zoneId || '').trim();
     const apiKey = String(zone.apiKey || '').trim();
-    const name = String(zone.name || '').trim();
+    const label = String(zone.label || zone.name || baseDomain || zoneId || '未命名').trim();
     if (!baseDomain && !zoneId && !apiKey) return null;
-    return { name, baseDomain, zoneId, apiKey, label: String(zone.label || baseDomain || name || zoneId || '未命名').trim() };
+    return { name: label, baseDomain, zoneId, apiKey, label };
 }
 
 
@@ -1129,14 +1181,8 @@ function normalizeSavedConfig(rawConfig = {}) {
         zoneId: String(rawConfig.zoneId || '').trim(),
         zones,
         targets,
-        tgToken: String(rawConfig.tgToken || '').trim(),
-        tgId: String(rawConfig.tgId || '').trim(),
-        tgEnabled: parseBooleanConfig(rawConfig.tgEnabled, true),
-        checkApi: String(rawConfig.checkApi || '').trim(),
-        checkApiBackup: String(rawConfig.checkApiBackup || '').trim(),
-        dohApi: String(rawConfig.dohApi || '').trim(),
-        authKey: String(rawConfig.authKey || '').trim(),
-        scheduledEnabled: parseBooleanConfig(rawConfig.scheduledEnabled, true),
+        ...Object.fromEntries(CONFIG_TEXT_KEYS.map(key => [key, String(rawConfig[key] || '').trim()])),
+        ...Object.fromEntries(CONFIG_TOGGLE_FIELDS.map(({ key, fallback }) => [key, parseBooleanConfig(rawConfig[key], fallback)])),
         settings
     };
 }
@@ -1155,20 +1201,16 @@ function createEnvConfig(env = {}, request = null) {
     const config = { ...DEFAULT_CONFIG };
     config.settings = normalizeRuntimeSettings();
 
-    config.apiKey = env.CF_KEY || DEFAULT_CONFIG.apiKey;
-    config.zoneId = env.CF_ZONEID || DEFAULT_CONFIG.zoneId;
+    ENV_STRING_CONFIG_FIELDS.forEach(([key, envKey]) => {
+        config[key] = env[envKey] || DEFAULT_CONFIG[key];
+    });
     const envBaseDomain = String(env.CF_BASE_DOMAIN || '').trim();
     config.zones = (config.apiKey || config.zoneId || envBaseDomain)
         ? [{ baseDomain: envBaseDomain, zoneId: config.zoneId, apiKey: config.apiKey, label: envBaseDomain || '环境变量配置' }]
         : [];
-    config.authKey = env.AUTH_KEY || DEFAULT_CONFIG.authKey;
-    config.tgToken = env.TG_TOKEN || DEFAULT_CONFIG.tgToken;
-    config.tgId = env.TG_ID || DEFAULT_CONFIG.tgId;
-    config.tgEnabled = parseBooleanConfig(env.TG_ENABLED, DEFAULT_CONFIG.tgEnabled);
-    config.checkApi = env.CHECK_API || DEFAULT_CONFIG.checkApi;
-    config.checkApiBackup = env.CHECK_API_BACKUP || DEFAULT_CONFIG.checkApiBackup;
-    config.dohApi = env.DOH_API || DEFAULT_CONFIG.dohApi;
-    config.scheduledEnabled = parseBooleanConfig(env.SCHEDULED_ENABLED, DEFAULT_CONFIG.scheduledEnabled);
+    CONFIG_TOGGLE_FIELDS.forEach(({ key, env: envKey }) => {
+        config[key] = parseBooleanConfig(env[envKey], DEFAULT_CONFIG[key]);
+    });
     if (request) {
         const url = new URL(request.url);
         config.projectUrl = `${url.protocol}//${url.host}`;
@@ -1181,7 +1223,7 @@ async function createConfig(env, request = null) {
 
     const savedConfig = await loadSavedConfig(env);
     if (savedConfig) {
-        for (const key of ['apiKey', 'zoneId', 'tgToken', 'tgId', 'checkApi', 'checkApiBackup', 'dohApi', 'authKey']) {
+        for (const key of ['apiKey', 'zoneId', ...CONFIG_TEXT_KEYS]) {
             if (savedConfig[key]) config[key] = savedConfig[key];
         }
         if (savedConfig.zones.length > 0) {
@@ -1189,8 +1231,9 @@ async function createConfig(env, request = null) {
             config.apiKey = savedConfig.zones[0].apiKey || config.apiKey;
             config.zoneId = savedConfig.zones[0].zoneId || config.zoneId;
         }
-        config.tgEnabled = savedConfig.tgEnabled;
-        config.scheduledEnabled = savedConfig.scheduledEnabled;
+        CONFIG_TOGGLE_FIELDS.forEach(({ key }) => {
+            config[key] = savedConfig[key];
+        });
         config.settings = savedConfig.settings;
         if (savedConfig.targets.length > 0) {
             config.targets = savedConfig.targets;
@@ -1808,14 +1851,14 @@ async function addAddressRecord(cfConfig, domain, ip) {
 async function getCandidateIPs(env, target, addLog, poolKey) {
     const pool = await env.IP_DATA.get(poolKey) || '';
     const poolName = getPoolFixedName(poolKey);
-    
+
     if (!pool) {
         addLog(`⚠️ ${poolName} 为空`);
         return [];
     }
-    
+
     let candidates = parsePoolList(pool);
-    
+
     // TXT模式不过滤端口，地址记录模式才过滤
     if (target.mode === 'A') {
         candidates = candidates.filter(l => {
@@ -1825,7 +1868,7 @@ async function getCandidateIPs(env, target, addLog, poolKey) {
     } else {
         candidates = candidates.filter(l => targetMetaMatchesStoredEntry(l, target));
     }
-    
+
     addLog(`📦 使用 ${poolName}: ${candidates.length} 个候选IP`);
     return candidates;
 }
@@ -2175,13 +2218,13 @@ async function maintainAllDomains(env, isManual = false, config) {
             checkDetails: [],
             logs: []
         };
-        
+
         const addLog = (m) => {
             const formattedMsg = formatLogMessage(m);
             report.logs.push(formattedMsg);
             console.log(formattedMsg);
         };
-        
+
         addLog(`🚀 开始维护: ${target.domain}`);
         // 内联 getPoolKeyForDomain
         const mappedPoolKey = domainPoolMapping?.[target.domain] ?? POOL_DEFAULT_KEY;
@@ -2194,7 +2237,7 @@ async function maintainAllDomains(env, isManual = false, config) {
         } else if (target.mode === 'TXT') {
             await maintainTXTRecords(env, target, addLog, report, poolKey, checkProxyIPCached, config);
         }
-        
+
         addLog(`✅ 完成: ${report.afterActive}/${target.minActive}`);
         allReports.push(report);
     }
@@ -2211,19 +2254,19 @@ async function maintainAllDomains(env, isManual = false, config) {
         const trashRaw = await env.IP_DATA.get(POOL_TRASH_KEY) || '';
         poolStats.get(POOL_TRASH_KEY).after = parsePoolList(trashRaw).length;
     }
-     
+
     // 1. 检查是否有IP变化（删除或新增）
     const hasIPChanges = allReports.some(r => r.added.length > 0 || r.removed.length > 0);
-    
+
     // 2. 检查是否有配置错误
     const hasConfigError = allReports.some(r => r.configError);
 
     // 3. 检查是否有域名活跃数不足且无法补充IP
     // 注：poolExhausted 表示候选IP不足（包括池枯竭、端口不匹配等情况）
-    const hasInsufficientActive = allReports.some(r => 
+    const hasInsufficientActive = allReports.some(r =>
         r.afterActive < r.minActive && r.poolExhausted
     );
-    
+
     // 通知条件：手动执行 OR IP变化 OR 活跃数不足 OR 配置错误
     const shouldNotify = isManual || hasIPChanges || hasInsufficientActive || hasConfigError;
 
@@ -2235,7 +2278,7 @@ async function maintainAllDomains(env, isManual = false, config) {
     }
 
     console.log(`✅ 维护任务完成，总耗时: ${Date.now() - startTime}ms，处理域名: ${config.targets.length}个`);
-    
+
     return {
         success: true,
         reports: allReports,
@@ -2410,16 +2453,8 @@ function escapeHTML(str) {
         .replace(/'/g, '&#39;');
 }
 
-function renderLoginHTML(url) {
-    const cleanUrl = new URL(url.href);
-    cleanUrl.searchParams.delete('key');
-    const nextPath = `${cleanUrl.pathname || '/'}${cleanUrl.search}`;
-    return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DDNS Pro - 登录</title>
+function renderLoginStyles() {
+    return `
   <style>
     *{box-sizing:border-box}
     body{min-height:100vh;margin:0;display:grid;place-items:center;padding:24px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f7;color:#1d1d1f}
@@ -2433,6 +2468,20 @@ function renderLoginHTML(url) {
     button:hover{background:#0068d9}
     .hint{margin-top:14px;text-align:center;color:#9ca3af;font-size:12px}
   </style>
+`;
+}
+
+function renderLoginHTML(url) {
+    const cleanUrl = new URL(url.href);
+    cleanUrl.searchParams.delete('key');
+    const nextPath = `${cleanUrl.pathname || '/'}${cleanUrl.search}`;
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DDNS Pro - 登录</title>
+  ${renderLoginStyles()}
 </head>
 <body>
   <form class="login" method="GET" action="${escapeHTML(nextPath || '/')}">
@@ -2447,22 +2496,8 @@ function renderLoginHTML(url) {
 </html>`;
 }
 
-function renderHTML(C, runtimeState = {}) {
-    const targetsJson = JSON.stringify(C.targets);
-    const settingsJson = JSON.stringify(getRuntimeSettings(C));
-    const appConfigJson = JSON.stringify(getEditableConfig(C));
-    const kvReady = runtimeState.kvReady !== false;
-    const version = APP_VERSION;
-    
-    // The Worker is intentionally single-file deployable. Keep front-end code
-    // grouped by the anchors below instead of extracting external assets.
-    const html = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DDNS Pro - IP管理面板</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🌐</text></svg>">
+function renderAppStyles() {
+    return `
     <style>
         :root {
             --primary: #007aff;
@@ -2879,6 +2914,15 @@ function renderHTML(C, runtimeState = {}) {
             padding: 6px 10px;
             font-size: 12px;
         }
+        .config-empty-state {
+            padding: 18px;
+            border: 1px dashed #d8dce3;
+            border-radius: 10px;
+            color: #6b7280;
+            background: #f8fafc;
+            font-size: 13px;
+            text-align: center;
+        }
         .config-save-btn {
             position: sticky;
             top: 10px;
@@ -3093,27 +3137,34 @@ function renderHTML(C, runtimeState = {}) {
             align-items: center;
             flex-wrap: wrap;
         }
-        .config-lock-hint {
+        .config-details {
+            overflow: hidden;
+        }
+        .config-details-summary {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            cursor: pointer;
+            list-style: none;
+        }
+        .config-details-summary::-webkit-details-marker {
+            display: none;
+        }
+        .config-details-summary::after {
+            content: '展开';
             color: #6b7280;
             font-size: 12px;
             background: #f5f5f7;
             border-radius: 999px;
             padding: 6px 10px;
         }
-        #page-config.config-locked input:not([readonly]),
-        #page-config.config-locked select,
-        #page-config.config-locked textarea {
-            pointer-events: none;
-            color: #6b7280;
-            background: #f5f5f7;
+        .config-details[open] .config-details-summary::after {
+            content: '收起';
         }
-        #page-config.config-locked .config-edit-action,
-        #page-config.config-locked .config-add-action,
-        #page-config.config-locked .switch input {
-            pointer-events: none;
-        }
-        #page-config.config-locked .config-mini-card {
-            cursor: default;
+        .config-details-body {
+            padding-top: 16px;
         }
         #page-config button:disabled {
             opacity: .55;
@@ -3385,7 +3436,7 @@ function renderHTML(C, runtimeState = {}) {
         .custom-modal-buttons .btn-abandon:hover {
             background: #e5e5e7;
         }
-        
+
         @media (max-width: 768px) {
             .pool-tools {
                 width: 100%;
@@ -3417,7 +3468,7 @@ function renderHTML(C, runtimeState = {}) {
                 padding: 3px 6px;
             }
         }
-        
+
         /* IP库管理和系统控制台卡片等高 */
         .col-lg-7 > .card.p-4:first-child,
         .col-lg-5 > .card.p-4 {
@@ -3449,7 +3500,7 @@ function renderHTML(C, runtimeState = {}) {
             max-height: 380px;
             flex-shrink: 0;
         }
-        
+
         /* 响应式优化 */
         @media (max-width: 768px) {
             .card {
@@ -3509,9 +3560,11 @@ function renderHTML(C, runtimeState = {}) {
             }
         }
     </style>
-</head>
-<body class="pb-5">
+`;
+}
 
+function renderGithubCorner() {
+    return `
 <a href="https://github.com/231128ikun/DDNS-cf-proxyip" class="github-corner" aria-label="View source on GitHub" target="_blank">
     <svg viewBox="0 0 250 250" aria-hidden="true">
         <path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path>
@@ -3519,7 +3572,11 @@ function renderHTML(C, runtimeState = {}) {
         <path d="M115.0,115.0 C114.9,115.1 118.7,116.6 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.6 C139.8,137.7 141.6,141.9 141.8,141.8 Z" fill="currentColor" class="octo-body"></path>
     </svg>
 </a>
+`;
+}
 
+function renderHero(C, kvReady) {
+    return `
 <div class="container hero">
     <h1>
         🌐 DDNS Pro 多域名管理
@@ -3548,13 +3605,80 @@ function renderHTML(C, runtimeState = {}) {
         </select>
     </div>
 </div>
+`;
+}
 
-<div class="container">
+function renderTopNav() {
+    return `
     <div class="top-nav">
         <button class="nav-tab active" data-page="dashboard" onclick="showPage('dashboard')">运行面板</button>
         <button class="nav-tab" data-page="config" onclick="showPage('config')">配置中心</button>
     </div>
+`;
+}
 
+function renderConfigToggleField(field) {
+    return `
+                <label class="switch">
+                    <input type="checkbox" id="${escapeHTML(field.id)}">
+                    <span class="switch-slider"></span>
+                    <span>${escapeHTML(field.label)}</span>
+                </label>`;
+}
+
+function renderConfigInputField(field) {
+    const limits = SETTING_LIMITS[field.key] || {};
+    const classes = ['field', field.span ? `span-${field.span}` : ''].filter(Boolean).join(' ');
+    const type = CONFIG_NUMBER_FIELDS.includes(field) ? 'number' : 'text';
+    const minAttr = limits.min === undefined ? '' : ` min="${limits.min}"`;
+    const maxAttr = limits.max === undefined ? '' : ` max="${limits.max}"`;
+    return `<label class="${escapeHTML(classes)}"><span>${escapeHTML(field.label)}</span><small>${escapeHTML(field.help)}</small><input id="${escapeHTML(field.id)}" type="${type}"${minAttr}${maxAttr} class="form-control form-control-sm" placeholder="${escapeHTML(field.placeholder)}"></label>`;
+}
+
+function renderConfigPage() {
+    return `
+    <div id="page-config" class="page-panel">
+        <details class="card p-4 mb-3 config-details">
+            <summary class="config-details-summary">
+                <h6 class="m-0 fw-bold">⚙️ 基础配置</h6>
+                <div class="config-toolbar">
+                    <button id="btn-cancel-config" class="btn btn-sm btn-outline-secondary" onclick="event.preventDefault(); resetConfigDraft()" style="display:none">还原改动</button>
+                    <button id="btn-save-config" class="btn btn-sm btn-success config-save-btn" onclick="event.preventDefault(); saveAppConfig()" style="display:none">💾 保存到 KV</button>
+                </div>
+            </summary>
+            <div class="config-details-body">
+                <div class="switch-row mb-3">
+                    ${CONFIG_TOGGLE_FIELDS.map(renderConfigToggleField).join('\n')}
+                </div>
+                <div class="config-grid mb-3">
+                    ${CONFIG_TEXT_FIELDS.concat(CONFIG_NUMBER_FIELDS).map(renderConfigInputField).join('\n')}
+                </div>
+            </div>
+        </details>
+
+        <div class="card p-4 mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="m-0 fw-bold">🌐 维护的域名配置</h6>
+                <button class="btn btn-sm btn-outline-primary config-add-action" onclick="addZoneConfigRow()">➕ 添加权限配置</button>
+            </div>
+            <div id="zone-config-list" class="config-card-grid"></div>
+            <div id="zone-edit-panel" class="config-edit-panel"></div>
+        </div>
+
+        <div class="card p-4 mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="m-0 fw-bold">🧭 管理域名</h6>
+                <button class="btn btn-sm btn-outline-primary config-add-action" onclick="addTargetConfigRow()">➕ 添加管理域名</button>
+            </div>
+            <div id="target-config-list" class="config-card-grid"></div>
+            <div id="target-edit-panel" class="config-edit-panel"></div>
+        </div>
+    </div>
+`;
+}
+
+function renderDashboardPage() {
+    return `
     <div id="page-dashboard" class="page-panel active">
     <!-- 解析实况 & Check ProxyIP -->
     <div class="card p-3">
@@ -3566,14 +3690,14 @@ function renderHTML(C, runtimeState = {}) {
                 <button class="btn btn-primary btn-sm" onclick="refreshStatus()" title="刷新当前域名解析">🔄</button>
             </div>
         </div>
-        
+
         <div id="manual-add-section" class="mb-2">
             <div class="input-group input-group-sm">
                 <input type="text" id="manual-add-ip" class="form-control" placeholder="手动添加IP到当前域名 (如: 1.2.3.4:443)">
                 <button class="btn btn-success" onclick="manualAddIP()" title="添加IP到当前域名">➕</button>
             </div>
         </div>
-        
+
         <!-- 统一展示区域 -->
         <div id="status-display" class="scroll-box" style="max-height:320px">
             <div class="table-responsive">
@@ -3612,7 +3736,7 @@ function renderHTML(C, runtimeState = {}) {
                         <button class="btn btn-sm" onclick="oneClickClean()" title="一键洗库" style="padding:6px 8px">🧹</button>
                     </div>
                 </div>
-                
+
                 <!-- 内容区域 - 自动扩展 -->
                 <div class="ip-content-area">
                     <!-- 加载区 -->
@@ -3622,10 +3746,10 @@ function renderHTML(C, runtimeState = {}) {
                         <button class="btn btn-sm btn-outline-secondary" onclick="loadCurrentPool()" title="加载当前池到输入框" style="white-space:nowrap">📂 从库</button>
                         <button class="btn btn-sm btn-outline-danger" onclick="clearInput()" title="清空输入框" style="white-space:nowrap">🗑️ 清空</button>
                     </div>
-                    
+
                     <!-- 输入区 -->
                     <textarea id="ip-input" class="form-control mb-2" rows="6" placeholder="支持格式：&#10;1.2.3.4:443&#10;1.2.3.4 (默认443端口)&#10;example.com:8443 (检测时解析为IP)&#10;1.2.3.4:443 #HK 香港节点 (带注释)" style="border-radius:12px;font-family:'SF Mono',monospace;font-size:12px"></textarea>
-                    
+
                     <!-- 筛选工具 -->
                     <div class="mb-2 filter-toolbar">
                         <div class="filter-line">
@@ -3642,7 +3766,7 @@ function renderHTML(C, runtimeState = {}) {
                         <span class="text-secondary small pool-stat" title="当前池中IP数量">📊<span id="pool-count">0</span></span>
                     </div>
                 </div>
-                
+
                 <!-- 底部按钮区域 - 固定在底部 -->
                 <div class="ip-actions-area mt-auto">
                     <!-- 主操作按钮 -->
@@ -3651,7 +3775,7 @@ function renderHTML(C, runtimeState = {}) {
                         <button class="btn btn-success" onclick="saveToCurrentPool('append')">💾 入库</button>
                         <button class="btn btn-outline-secondary btn-sm" onclick="removeFromPool()" title="从库中移除输入框中的IP">从库中移除</button>
                     </div>
-                    
+
                     <!-- 垃圾桶专用操作 -->
                     <div id="trash-actions" style="display:none" class="mt-2">
                         <div class="row g-2">
@@ -3665,7 +3789,7 @@ function renderHTML(C, runtimeState = {}) {
                     </div>
                 </div>
             </div>
-            
+
             <!-- 域名池绑定 -->
             <div id="domain-binding-card" class="card p-4 mb-3 domain-binding-card">
                 <div class="domain-binding-header" onclick="toggleDomainBindingPanel()" title="点击展开/折叠域名池绑定">
@@ -3686,7 +3810,7 @@ function renderHTML(C, runtimeState = {}) {
                     </table>
                 </div>
             </div>
-            
+
         </div>
 
         <!-- 控制台 -->
@@ -3702,74 +3826,26 @@ function renderHTML(C, runtimeState = {}) {
         </div>
     </div>
     </div>
+`;
+}
 
-    <div id="page-config" class="page-panel">
-        <div class="card p-4 mb-3">
-            <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                <h6 class="m-0 fw-bold">⚙️ 配置中心</h6>
-                <div class="config-toolbar">
-                    <span id="config-lock-hint" class="config-lock-hint">查看模式</span>
-                    <button id="btn-edit-config" class="btn btn-sm btn-outline-primary" onclick="setConfigEditMode(true)">编辑配置</button>
-                    <button id="btn-cancel-config" class="btn btn-sm btn-outline-secondary" onclick="cancelConfigEdit()" style="display:none">取消</button>
-                    <button id="btn-save-config" class="btn btn-sm btn-success config-save-btn" onclick="saveAppConfig()" style="display:none">💾 保存改动</button>
-                </div>
-            </div>
-            <div class="switch-row mb-3">
-                <label class="switch">
-                    <input type="checkbox" id="cfg-scheduled-enabled">
-                    <span class="switch-slider"></span>
-                    <span>自动维护</span>
-                </label>
-                <label class="switch">
-                    <input type="checkbox" id="cfg-tg-enabled">
-                    <span class="switch-slider"></span>
-                    <span>TG通知</span>
-                </label>
-            </div>
-            <div class="config-grid mb-3">
-                <label class="field span-2"><span>检测 API</span><small>主检测接口，支持 {proxyip} 占位符。</small><input id="cfg-check-api" class="form-control form-control-sm" placeholder="CHECK_API"></label>
-                <label class="field span-2"><span>备用检测 API</span><small>主接口失败或返回不可用时用于复检，可留空。</small><input id="cfg-check-api-backup" class="form-control form-control-sm" placeholder="CHECK_API_BACKUP"></label>
-                <label class="field"><span>DoH API</span><small>域名解析查询接口。</small><input id="cfg-doh-api" class="form-control form-control-sm" placeholder="DOH_API"></label>
-                <label class="field"><span>面板密钥</span><small>为空则关闭前端鉴权。</small><input id="cfg-auth-key" class="form-control form-control-sm" placeholder="AUTH_KEY"></label>
-                <label class="field"><span>TG Bot Token</span><small>开启 TG 通知时必填。</small><input id="cfg-tg-token" class="form-control form-control-sm" placeholder="TG_TOKEN"></label>
-                <label class="field"><span>TG Chat ID</span><small>通知接收账号或群组 ID。</small><input id="cfg-tg-id" class="form-control form-control-sm" placeholder="TG_ID"></label>
-                <label class="field"><span>检测并发</span><small>前端批量检测并发数。</small><input id="cfg-concurrent-checks" type="number" min="1" max="128" class="form-control form-control-sm" placeholder="32"></label>
-                <label class="field"><span>检测超时(ms)</span><small>单个检测接口请求超时。</small><input id="cfg-check-timeout" type="number" min="500" max="30000" class="form-control form-control-sm" placeholder="3000"></label>
-                <label class="field"><span>远程加载超时(ms)</span><small>远程 TXT URL 加载。</small><input id="cfg-remote-timeout" type="number" min="1000" max="60000" class="form-control form-control-sm" placeholder="5000"></label>
-                <label class="field"><span>DoH超时(ms)</span><small>DNS over HTTPS 查询。</small><input id="cfg-doh-timeout" type="number" min="1000" max="30000" class="form-control form-control-sm" placeholder="5000"></label>
-                <label class="field"><span>默认活跃数</span><small>新增管理域名默认值。</small><input id="cfg-default-min-active" type="number" min="0" max="100" class="form-control form-control-sm" placeholder="3"></label>
-                <label class="field"><span>垃圾桶上限</span><small>超过后保留最新条目。</small><input id="cfg-max-trash-size" type="number" min="0" max="100000" class="form-control form-control-sm" placeholder="1000"></label>
-            </div>
-        </div>
-
-        <div class="card p-4 mb-3">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <h6 class="m-0 fw-bold">🌐 维护的域名配置</h6>
-                <button class="btn btn-sm btn-outline-primary config-add-action" onclick="addZoneConfigRow()">➕ 添加权限配置</button>
-            </div>
-            <div id="zone-config-list" class="config-card-grid"></div>
-            <div id="zone-edit-panel" class="config-edit-panel"></div>
-        </div>
-
-        <div class="card p-4 mb-3">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <h6 class="m-0 fw-bold">🧭 管理域名</h6>
-                <button class="btn btn-sm btn-outline-primary config-add-action" onclick="addTargetConfigRow()">➕ 添加管理域名</button>
-            </div>
-            <div id="target-config-list" class="config-card-grid"></div>
-            <div id="target-edit-panel" class="config-edit-panel"></div>
-        </div>
-    </div>
-</div>
-<div id="toast" class="toast" role="status" aria-live="polite"></div>
-
+function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnabled }) {
+    return `
 <script>
     // ===== Client state =====
     const TARGETS = ${targetsJson};
     let SETTINGS = ${settingsJson};
     const INITIAL_APP_CONFIG = ${appConfigJson};
-    const AUTH_ENABLED = ${C.authKey ? 'true' : 'false'};
+    const AUTH_ENABLED = ${authEnabled ? 'true' : 'false'};
     const MODE_LABELS = {'A': 'A/AAAA', 'TXT': 'TXT'};
+    const CONFIG_TEXT_FIELDS = ${JSON.stringify(CONFIG_TEXT_FIELDS.map(({ key, id }) => [key, id]))};
+    const CONFIG_NUMBER_FIELDS = ${JSON.stringify(CONFIG_NUMBER_FIELDS.map(({ key, id }) => [key, id]))};
+    const CONFIG_TOGGLE_FIELDS = ${JSON.stringify(CONFIG_TOGGLE_FIELDS.map(({ key, id, fallback }) => [key, id, fallback]))};
+    const CONFIG_FIELD_IDS = [
+        ...CONFIG_TEXT_FIELDS.map(([, id]) => id),
+        ...CONFIG_NUMBER_FIELDS.map(([, id]) => id),
+        ...CONFIG_TOGGLE_FIELDS.map(([, id]) => id)
+    ];
     let currentTargetIndex = 0;
     const POOL_DEFAULT_KEY = '${POOL_DEFAULT_KEY}';
     const POOL_TRASH_KEY = '${POOL_TRASH_KEY}';
@@ -3780,14 +3856,14 @@ function renderHTML(C, runtimeState = {}) {
     let poolDisplayNames = {};
     let toastTimer = null;
     let configDraft = null;
+    let configSavedSnapshot = null;
     let configDirty = false;
-    let configEditMode = false;
     let domainBindingExpanded = false;
-    
+
     // 检测中断状态
     let pausedCheckState = null; // { uncheckedLines: [], validIPs: [], total: number }
-    
-    
+
+
     // ===== Modal / small UI helpers =====
     // 自定义模态对话框
     function showCheckInterruptModal(stats) {
@@ -3810,7 +3886,7 @@ function renderHTML(C, runtimeState = {}) {
                 </div>
             \`;
             document.body.appendChild(overlay);
-            
+
             document.getElementById('modal-continue').onclick = () => {
                 document.body.removeChild(overlay);
                 resolve(true);
@@ -3821,7 +3897,7 @@ function renderHTML(C, runtimeState = {}) {
             };
         });
     }
-    
+
     // 池名显示（统一格式）
     const POOL_NAMES = { [POOL_DEFAULT_KEY]: '默认池', [POOL_TRASH_KEY]: '🗑️ 垃圾桶' };
     const NUMBERED_POOL_KEY_RE = /^ip_pool_(\\d{3})$/;
@@ -3859,7 +3935,7 @@ function renderHTML(C, runtimeState = {}) {
         updatePoolSelector();
         updateDomainBindingTable();
     }
-    
+
     // ===== Form / toast / navigation helpers =====
     function setInputValue(id, value) {
         const el = document.getElementById(id);
@@ -3905,48 +3981,28 @@ function renderHTML(C, runtimeState = {}) {
         document.querySelectorAll('.nav-tab').forEach(el => el.classList.toggle('active', el.dataset.page === page));
     }
 
-    function setConfigEditMode(enabled) {
-        configEditMode = !!enabled;
-        const page = document.getElementById('page-config');
-        if (page) {
-            page.classList.toggle('config-locked', !configEditMode);
-            page.querySelectorAll('input:not([type="hidden"]), select, textarea').forEach(el => {
-                if (!el.readOnly) el.disabled = !configEditMode;
-            });
-            page.querySelectorAll('.config-edit-action, .config-add-action').forEach(el => {
-                el.disabled = !configEditMode;
-            });
-        }
-        const hint = document.getElementById('config-lock-hint');
-        if (hint) hint.textContent = configEditMode ? '编辑模式' : '查看模式';
-        const editBtn = document.getElementById('btn-edit-config');
-        const cancelBtn = document.getElementById('btn-cancel-config');
+    function updateConfigActionButtons() {
         const saveBtn = document.getElementById('btn-save-config');
-        if (editBtn) editBtn.style.display = configEditMode ? 'none' : 'inline-block';
-        if (cancelBtn) cancelBtn.style.display = configEditMode ? 'inline-block' : 'none';
-        if (saveBtn) saveBtn.style.display = configEditMode && configDirty ? 'inline-block' : 'none';
+        const cancelBtn = document.getElementById('btn-cancel-config');
+        const display = configDirty ? 'inline-block' : 'none';
+        if (saveBtn) saveBtn.style.display = display;
+        if (cancelBtn) cancelBtn.style.display = display;
+    }
+
+
+    function resetConfigDraft() {
+        loadAppConfigToForm(configSavedSnapshot || INITIAL_APP_CONFIG, false);
         closeConfigEditor('zone');
         closeConfigEditor('target');
-    }
-
-    function ensureConfigEditable() {
-        if (configEditMode) return true;
-        showToast('请先点击“编辑配置”', 'error');
-        return false;
-    }
-
-    function cancelConfigEdit() {
-        loadAppConfigToForm(INITIAL_APP_CONFIG);
-        setConfigEditMode(false);
-        showToast('已退出编辑模式');
+        showToast('已还原未保存改动');
     }
 
     function bindConfigGlobalChangeHandlers() {
-        ['cfg-scheduled-enabled', 'cfg-tg-enabled', 'cfg-check-api', 'cfg-check-api-backup', 'cfg-doh-api', 'cfg-auth-key', 'cfg-tg-token', 'cfg-tg-id', 'cfg-concurrent-checks', 'cfg-check-timeout', 'cfg-remote-timeout', 'cfg-doh-timeout', 'cfg-default-min-active', 'cfg-max-trash-size'].forEach(id => {
+        CONFIG_FIELD_IDS.forEach(id => {
             const el = document.getElementById(id);
             if (!el || el.dataset.dirtyBound) return;
             el.dataset.dirtyBound = '1';
-            el.addEventListener('change', () => markConfigDirty('全局配置已变更，记得保存改动'));
+            el.addEventListener('change', () => markConfigDirty('基础配置已保存到页面，点击“保存到 KV”后生效'));
             el.addEventListener('input', () => markConfigDirty());
         });
     }
@@ -3956,40 +4012,92 @@ function renderHTML(C, runtimeState = {}) {
     }
 
     function markConfigDirty(message) {
-        if (!configEditMode) return;
         configDirty = true;
-        const btn = document.getElementById('btn-save-config');
-        if (btn) btn.style.display = 'inline-block';
+        updateConfigActionButtons();
         if (message) showToast(message, 'info');
     }
 
     function clearConfigDirty() {
         configDirty = false;
-        const btn = document.getElementById('btn-save-config');
-        if (btn) btn.style.display = 'none';
+        updateConfigActionButtons();
     }
 
     // ===== Config center =====
     function normalizeDraftZone(zone = {}, index = 0) {
+        const label = String(zone.label || zone.name || zone.baseDomain || '').trim();
         return {
-            name: '配置' + (index + 1),
-            label: String(zone.label || zone.baseDomain || ('配置' + (index + 1))).trim(),
+            name: label,
+            label,
             baseDomain: String(zone.baseDomain || '').trim(),
             zoneId: String(zone.zoneId || '').trim(),
             apiKey: String(zone.apiKey || '').trim()
         };
     }
 
+    function hasZoneConfigValue(zone = {}) {
+        return Boolean(String(zone.baseDomain || '').trim() || String(zone.zoneId || '').trim() || String(zone.apiKey || '').trim());
+    }
+
+    function normalizeConfigCompareValue(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    function findDuplicateDraftValue(items, keyFn, skipIndex = -1) {
+        const seen = new Set();
+        for (let i = 0; i < (items || []).length; i++) {
+            if (i === skipIndex) continue;
+            const key = normalizeConfigCompareValue(keyFn(items[i]));
+            if (!key) continue;
+            if (seen.has(key)) return key;
+            seen.add(key);
+        }
+        return '';
+    }
+
+    function getZoneDuplicateMessage(zones, skipIndex = -1) {
+        const duplicateBaseDomain = findDuplicateDraftValue(zones, zone => zone.baseDomain, skipIndex);
+        if (duplicateBaseDomain) return '权限配置重复：' + duplicateBaseDomain;
+        return '';
+    }
+
+    function getTargetDuplicateKey(target = {}) {
+        const domain = normalizeConfigCompareValue(target.domain || computeDomainFromTarget(target));
+        const mode = target.mode === 'TXT' ? 'TXT' : 'A';
+        return domain ? domain + '|' + mode : '';
+    }
+
+    function formatTargetDuplicateKey(key) {
+        const parts = String(key || '').split('|');
+        const domain = parts[0] || '';
+        const mode = parts[1] === 'TXT' ? 'TXT' : 'A/AAAA';
+        return domain + ' / ' + mode;
+    }
+
+    function getTargetDuplicateMessage(targets, skipIndex = -1) {
+        const duplicateTarget = findDuplicateDraftValue(targets, getTargetDuplicateKey, skipIndex);
+        return duplicateTarget ? '管理域名重复：' + formatTargetDuplicateKey(duplicateTarget) : '';
+    }
+
     function getDraftZones() {
         if (!configDraft) configDraft = cloneConfig(INITIAL_APP_CONFIG);
-        configDraft.zones = (Array.isArray(configDraft.zones) && configDraft.zones.length ? configDraft.zones : [{ label: '配置1' }])
-            .map(normalizeDraftZone);
+        configDraft.zones = (Array.isArray(configDraft.zones) ? configDraft.zones : [])
+            .map(normalizeDraftZone)
+            .filter(hasZoneConfigValue);
         return configDraft.zones;
+    }
+
+    function getDraftTargets() {
+        if (!configDraft) configDraft = cloneConfig(INITIAL_APP_CONFIG);
+        configDraft.targets = (Array.isArray(configDraft.targets) ? configDraft.targets : [])
+            .filter(target => target && typeof target === 'object');
+        return configDraft.targets;
     }
 
     function getZoneDisplayName(index) {
         const zone = getDraftZones()[index] || {};
-        return [zone.name || ('配置' + (index + 1)), zone.label || zone.baseDomain].filter(Boolean).join(' · ');
+        return zone.baseDomain || zone.label || zone.zoneId
+            ? [zone.label || zone.name || zone.baseDomain || '未命名权限配置', zone.baseDomain].filter((value, itemIndex, values) => value && values.indexOf(value) === itemIndex).join(' · ')
+            : '未选择权限配置';
     }
 
     function computeDomainFromTarget(target = {}) {
@@ -4001,24 +4109,26 @@ function renderHTML(C, runtimeState = {}) {
     }
 
     function renderConfigCards() {
-        renderZoneConfigRows(configDraft?.zones || []);
-        renderTargetConfigRows(configDraft?.targets || []);
+        renderZoneConfigRows(getDraftZones());
+        renderTargetConfigRows(getDraftTargets());
     }
 
     function renderZoneConfigRows(zones) {
         const list = document.getElementById('zone-config-list');
         if (!list) return;
-        const rows = (Array.isArray(zones) && zones.length ? zones : [{ label: '配置1', baseDomain: '', zoneId: '', apiKey: '' }]).map(normalizeDraftZone);
+        const rows = (Array.isArray(zones) ? zones : []).map(normalizeDraftZone).filter(hasZoneConfigValue);
         if (configDraft) configDraft.zones = rows;
-        list.innerHTML = rows.map((zone, index) => buildZoneCard(zone, index)).join('');
+        list.innerHTML = rows.length
+            ? rows.map((zone, index) => buildZoneCard(zone, index)).join('')
+            : '<div class="config-empty-state">暂无权限配置，点击“添加权限配置”创建。</div>';
     }
 
     function buildZoneCard(zone = {}, index = 0) {
-        const title = zone.label || zone.baseDomain || zone.name || ('配置' + (index + 1));
+        const title = zone.label || zone.name || zone.baseDomain || '未命名权限配置';
         return \`
             <div class="config-mini-card" onclick="editZoneConfig(\${index})">
                 <h5>\${escapeHTML(title)}</h5>
-                <div class="meta"><span>\${escapeHTML(zone.name || ('配置' + (index + 1)))}</span><span>\${escapeHTML(zone.baseDomain || '未设置根域')}</span></div>
+                <div class="meta"><span>\${escapeHTML(zone.baseDomain || '未设置维护域名')}</span></div>
                 <div class="meta"><span>Zone: \${escapeHTML(zone.zoneId ? '已填写' : '未填写')}</span><span>CF Key: \${escapeHTML(zone.apiKey ? '已填写' : '未填写')}</span></div>
                 <div class="actions" onclick="event.stopPropagation()">
                     <button class="btn btn-outline-primary btn-sm config-edit-action" onclick="editZoneConfig(\${index})">编辑</button>
@@ -4029,9 +4139,8 @@ function renderHTML(C, runtimeState = {}) {
     }
 
     function addZoneConfigRow() {
-        if (!ensureConfigEditable()) return;
         const zones = getDraftZones();
-        showZoneEditor(zones.length, { label: '配置' + (zones.length + 1), baseDomain: '', zoneId: '', apiKey: '' });
+        showZoneEditor(zones.length, { label: '', baseDomain: '', zoneId: '', apiKey: '' });
     }
 
     function collectZoneConfigRows() {
@@ -4040,27 +4149,30 @@ function renderHTML(C, runtimeState = {}) {
 
     function getZoneOptionsHtml(selectedIndex) {
         const zones = getDraftZones();
+        if (!zones.length) {
+            return '<option value="" disabled selected>请先添加权限配置</option>';
+        }
         return zones.map((zone, index) => {
-            const label = [zone.name || \`配置\${index + 1}\`, zone.label || zone.baseDomain].filter(Boolean).join(' · ');
+            const label = [zone.label || zone.name || zone.baseDomain || '未命名权限配置', zone.baseDomain].filter((value, itemIndex, values) => value && values.indexOf(value) === itemIndex).join(' · ');
             return \`<option value="\${index}" \${Number(selectedIndex) === index ? 'selected' : ''}>\${escapeHTML(label)}</option>\`;
-        }).join('') || '<option value="">请先添加维护域名配置</option>';
+        }).join('');
     }
 
     function editZoneConfig(index) {
-        if (!ensureConfigEditable()) return;
         showZoneEditor(index, getDraftZones()[index] || {});
     }
 
     function showZoneEditor(index, zone = {}) {
         const panel = document.getElementById('zone-edit-panel');
         if (!panel) return;
-        const number = index + 1;
+        const noteValue = zone.label && zone.label !== zone.baseDomain
+            ? zone.label
+            : (zone.name && zone.name !== zone.baseDomain ? zone.name : '');
         panel.classList.add('active');
         panel.innerHTML = \`
             <h6 class="mb-3 fw-bold">\${index >= getDraftZones().length ? '添加' : '编辑'}权限配置</h6>
             <div class="config-edit-grid">
-                <label class="field"><span>配置</span><small>自动编号。</small><input id="edit-zone-name" class="form-control form-control-sm" value="\${escapeHTML(zone.name || ('配置' + number))}" readonly></label>
-                <label class="field"><span>别名</span><small>卡片显示名称。</small><input id="edit-zone-label" class="form-control form-control-sm" value="\${escapeHTML(zone.label || zone.baseDomain || ('配置' + number))}" placeholder="配置\${number}"></label>
+                <label class="field"><span>备注</span><small>可选；不填时使用维护域名。</small><input id="edit-zone-label" class="form-control form-control-sm" value="\${escapeHTML(noteValue)}" placeholder="可选"></label>
                 <label class="field"><span>目标维护域名</span><small>目前只支持托管在cf的域名</small><input id="edit-zone-base" class="form-control form-control-sm" value="\${escapeHTML(zone.baseDomain || '')}" placeholder="example.com"></label>
                 <label class="field"><span>Zone ID</span><small>Cloudflare 区域 ID。</small><input id="edit-zone-id" class="form-control form-control-sm" value="\${escapeHTML(zone.zoneId || '')}" placeholder="Zone ID"></label>
                 <label class="field span-2"><span>CF Key</span><small>需要 DNS 编辑权限。</small><input id="edit-zone-key" class="form-control form-control-sm" value="\${escapeHTML(zone.apiKey || '')}" placeholder="CF API Token"></label>
@@ -4074,33 +4186,42 @@ function renderHTML(C, runtimeState = {}) {
     }
 
     function commitZoneEditor(index) {
-        if (!ensureConfigEditable()) return;
         const zones = getDraftZones();
-        zones[index] = normalizeDraftZone({
+        const nextZone = normalizeDraftZone({
             label: getInputValue('edit-zone-label'),
             baseDomain: getInputValue('edit-zone-base'),
             zoneId: getInputValue('edit-zone-id'),
             apiKey: getInputValue('edit-zone-key')
         }, index);
-        configDraft.zones = zones;
+        if (!hasZoneConfigValue(nextZone)) {
+            showToast('请至少填写目标维护域名、Zone ID 或 CF Key', 'error');
+            return;
+        }
+        const nextZones = zones.slice();
+        nextZones[index] = nextZone;
+        const duplicateMessage = getZoneDuplicateMessage(nextZones);
+        if (duplicateMessage) {
+            showToast(duplicateMessage, 'error');
+            return;
+        }
+        configDraft.zones = nextZones;
         renderConfigCards();
         closeConfigEditor('zone');
-        markConfigDirty('权限配置已更新，记得保存改动');
+        markConfigDirty('权限配置已保存到页面，点击“保存到 KV”后生效');
     }
 
     function deleteZoneConfig(index) {
-        if (!ensureConfigEditable()) return;
         const zones = getDraftZones();
-        if (!confirm('确认删除这个权限配置？相关管理域名会改到配置1。')) return;
+        if (!confirm('确认删除这个权限配置？相关管理域名会改到第一组权限配置。')) return;
         zones.splice(index, 1);
-        configDraft.zones = (zones.length ? zones : [{ label: '配置1' }]).map(normalizeDraftZone);
-        configDraft.targets = (configDraft.targets || []).map(target => ({
+        configDraft.zones = zones.map(normalizeDraftZone).filter(hasZoneConfigValue);
+        configDraft.targets = getDraftTargets().map(target => ({
             ...target,
             zoneIndex: target.zoneIndex === index ? 0 : (target.zoneIndex > index ? target.zoneIndex - 1 : target.zoneIndex)
         }));
         renderConfigCards();
         closeConfigEditor('zone');
-        markConfigDirty('权限配置已删除，记得保存改动');
+        markConfigDirty('权限配置已保存到页面，点击“保存到 KV”后生效');
     }
 
     function closeConfigEditor(type) {
@@ -4114,9 +4235,11 @@ function renderHTML(C, runtimeState = {}) {
     function renderTargetConfigRows(targets) {
         const list = document.getElementById('target-config-list');
         if (!list) return;
-        const rows = (Array.isArray(targets) && targets.length ? targets : [{ mode: 'A', zoneIndex: 0, prefix: '', port: '443', minActive: 3 }]);
+        const rows = (Array.isArray(targets) ? targets : []).filter(target => target && typeof target === 'object');
         if (configDraft) configDraft.targets = rows;
-        list.innerHTML = rows.map((target, index) => buildTargetCard(target, index)).join('');
+        list.innerHTML = rows.length
+            ? rows.map((target, index) => buildTargetCard(target, index)).join('')
+            : '<div class="config-empty-state">暂无管理域名，点击“添加管理域名”创建。</div>';
     }
 
     function buildTargetCard(target = {}, index = 0) {
@@ -4144,45 +4267,38 @@ function renderHTML(C, runtimeState = {}) {
     }
 
     function addTargetConfigRow() {
-        if (!ensureConfigEditable()) return;
-        showTargetEditor((configDraft?.targets || []).length, { mode: 'A', zoneIndex: 0, prefix: '', port: '443', minActive: (configDraft?.settings?.DEFAULT_MIN_ACTIVE ?? SETTINGS.DEFAULT_MIN_ACTIVE) });
+        if (!getDraftZones().length) {
+            showToast('请先添加权限配置，再创建管理域名', 'error');
+            return;
+        }
+        showTargetEditor(getDraftTargets().length, { mode: 'A', zoneIndex: 0, prefix: '', port: '443', minActive: (configDraft?.settings?.DEFAULT_MIN_ACTIVE ?? SETTINGS.DEFAULT_MIN_ACTIVE) });
     }
 
-    function loadAppConfigToForm(config) {
+    function loadAppConfigToForm(config, updateSnapshot = true) {
         configDraft = cloneConfig(config);
-        setInputValue('cfg-check-api', config.checkApi);
-        setInputValue('cfg-check-api-backup', config.checkApiBackup);
-        setInputValue('cfg-doh-api', config.dohApi);
-        setInputValue('cfg-auth-key', config.authKey);
-        setInputValue('cfg-tg-token', config.tgToken);
-        setInputValue('cfg-tg-id', config.tgId);
+        if (updateSnapshot) configSavedSnapshot = cloneConfig(config);
+        CONFIG_TEXT_FIELDS.forEach(([key, id]) => setInputValue(id, config[key]));
         const settings = config.settings || SETTINGS;
-        setInputValue('cfg-concurrent-checks', settings.CONCURRENT_CHECKS ?? SETTINGS.CONCURRENT_CHECKS);
-        setInputValue('cfg-check-timeout', settings.CHECK_TIMEOUT ?? SETTINGS.CHECK_TIMEOUT);
-        setInputValue('cfg-remote-timeout', settings.REMOTE_LOAD_TIMEOUT ?? SETTINGS.REMOTE_LOAD_TIMEOUT);
-        setInputValue('cfg-doh-timeout', settings.DOH_TIMEOUT ?? SETTINGS.DOH_TIMEOUT);
-        setInputValue('cfg-default-min-active', settings.DEFAULT_MIN_ACTIVE ?? SETTINGS.DEFAULT_MIN_ACTIVE);
-        setInputValue('cfg-max-trash-size', settings.MAX_TRASH_SIZE ?? SETTINGS.MAX_TRASH_SIZE);
-        const scheduledToggle = document.getElementById('cfg-scheduled-enabled');
-        const tgToggle = document.getElementById('cfg-tg-enabled');
-        if (scheduledToggle) scheduledToggle.checked = config.scheduledEnabled !== false;
-        if (tgToggle) tgToggle.checked = config.tgEnabled !== false;
+        CONFIG_NUMBER_FIELDS.forEach(([key, id]) => setInputValue(id, settings[key] ?? SETTINGS[key]));
+        CONFIG_TOGGLE_FIELDS.forEach(([key, id, fallback]) => {
+            const el = document.getElementById(id);
+            if (el) el.checked = config[key] === undefined ? fallback : config[key] !== false;
+        });
         renderConfigCards();
         bindConfigGlobalChangeHandlers();
         clearConfigDirty();
-        setConfigEditMode(configEditMode);
+        updateConfigActionButtons();
     }
 
     function collectTargetConfigRows() {
-        return (configDraft?.targets || []).map(target => ({
+        return getDraftTargets().map(target => ({
             ...target,
             domain: computeDomainFromTarget(target)
         })).filter(target => target.domain);
     }
 
     function editTargetConfig(index) {
-        if (!ensureConfigEditable()) return;
-        showTargetEditor(index, (configDraft?.targets || [])[index] || {});
+        showTargetEditor(index, (getDraftTargets()[index] || {}));
     }
 
     function showTargetEditor(index, target = {}) {
@@ -4267,83 +4383,91 @@ function renderHTML(C, runtimeState = {}) {
     }
 
     function commitTargetEditor(index) {
-        if (!ensureConfigEditable()) return;
         const target = getTargetEditorValue();
         if (!target.domain) {
             showToast('请先填写权限配置和域名前缀', 'error');
             return;
         }
-        if (!configDraft.targets) configDraft.targets = [];
-        configDraft.targets[index] = target;
+        const targets = getDraftTargets();
+        const nextTargets = targets.slice();
+        nextTargets[index] = target;
+        const duplicateMessage = getTargetDuplicateMessage(nextTargets);
+        if (duplicateMessage) {
+            showToast(duplicateMessage, 'error');
+            return;
+        }
+        configDraft.targets = nextTargets;
         renderConfigCards();
         closeConfigEditor('target');
-        markConfigDirty('管理域名已更新，记得保存改动');
+        markConfigDirty('管理域名已保存到页面，点击“保存到 KV”后生效');
     }
 
     function deleteTargetConfig(index) {
-        if (!ensureConfigEditable()) return;
         if (!confirm('确认删除这个管理域名？')) return;
-        if (!configDraft.targets) configDraft.targets = [];
-        configDraft.targets.splice(index, 1);
+        const targets = getDraftTargets();
+        targets.splice(index, 1);
+        configDraft.targets = targets;
         renderConfigCards();
         closeConfigEditor('target');
-        markConfigDirty('管理域名已删除，记得保存改动');
+        markConfigDirty('管理域名已保存到页面，点击“保存到 KV”后生效');
     }
 
     function toggleTargetEnabled(index, enabled) {
-        if (!ensureConfigEditable()) {
-            renderConfigCards();
-            return;
-        }
-        if (!configDraft.targets || !configDraft.targets[index]) return;
-        configDraft.targets[index].enabled = enabled;
+        const targets = getDraftTargets();
+        if (!targets[index]) return;
+        targets[index].enabled = enabled;
+        configDraft.targets = targets;
         renderConfigCards();
-        markConfigDirty(enabled ? '已开启该域名维护，记得保存改动' : '已关闭该域名维护，记得保存改动');
+        markConfigDirty(enabled ? '已开启该域名维护，点击“保存到 KV”后生效' : '已关闭该域名维护，点击“保存到 KV”后生效');
     }
 
     async function saveAppConfig() {
-        if (!ensureConfigEditable()) return;
-        const scheduledToggle = document.getElementById('cfg-scheduled-enabled');
-        const tgToggle = document.getElementById('cfg-tg-enabled');
         const config = {
-            zones: collectZoneConfigRows(),
-            checkApi: getInputValue('cfg-check-api'),
-            checkApiBackup: getInputValue('cfg-check-api-backup'),
-            dohApi: getInputValue('cfg-doh-api'),
-            authKey: getInputValue('cfg-auth-key'),
-            tgToken: getInputValue('cfg-tg-token'),
-            tgId: getInputValue('cfg-tg-id'),
-            scheduledEnabled: scheduledToggle ? scheduledToggle.checked : true,
-            tgEnabled: tgToggle ? tgToggle.checked : true,
-            settings: {
-                CONCURRENT_CHECKS: getNumberInputValue('cfg-concurrent-checks', SETTINGS.CONCURRENT_CHECKS),
-                CHECK_TIMEOUT: getNumberInputValue('cfg-check-timeout', SETTINGS.CHECK_TIMEOUT),
-                REMOTE_LOAD_TIMEOUT: getNumberInputValue('cfg-remote-timeout', SETTINGS.REMOTE_LOAD_TIMEOUT),
-                DOH_TIMEOUT: getNumberInputValue('cfg-doh-timeout', SETTINGS.DOH_TIMEOUT),
-                DEFAULT_MIN_ACTIVE: getNumberInputValue('cfg-default-min-active', SETTINGS.DEFAULT_MIN_ACTIVE),
-                MAX_TRASH_SIZE: getNumberInputValue('cfg-max-trash-size', SETTINGS.MAX_TRASH_SIZE)
-            },
-            targets: collectTargetConfigRows()
+            zones: collectZoneConfigRows()
         };
+        CONFIG_TEXT_FIELDS.forEach(([key, id]) => {
+            config[key] = getInputValue(id);
+        });
+        CONFIG_TOGGLE_FIELDS.forEach(([key, id, fallback]) => {
+            const el = document.getElementById(id);
+            config[key] = el ? el.checked : fallback;
+        });
+        config.settings = {};
+        CONFIG_NUMBER_FIELDS.forEach(([key, id]) => {
+            config.settings[key] = getNumberInputValue(id, SETTINGS[key]);
+        });
+        config.targets = collectTargetConfigRows();
+        const zoneDuplicateMessage = getZoneDuplicateMessage(config.zones);
+        if (zoneDuplicateMessage) {
+            showToast(zoneDuplicateMessage, 'error');
+            return;
+        }
+        const targetDuplicateMessage = getTargetDuplicateMessage(config.targets);
+        if (targetDuplicateMessage) {
+            showToast(targetDuplicateMessage, 'error');
+            return;
+        }
         try {
             const btn = document.getElementById('btn-save-config');
+            const cancelBtn = document.getElementById('btn-cancel-config');
             if (btn) {
                 btn.disabled = true;
                 btn.textContent = '保存中...';
             }
-            const r = await apiFetch('/api/save-config', {
-                method: 'POST',
-                body: JSON.stringify({ config })
-            }).then(r => r.json());
+            if (cancelBtn) cancelBtn.disabled = true;
+            const r = await apiPostJson('/api/save-config', { config });
             if (!r.success) {
                 log(\`❌ 配置保存失败: \${r.error || '未知错误'}\`, 'error');
                 showToast(r.error || '配置保存失败', 'error');
                 return;
             }
-            configDraft = cloneConfig(r.config || config);
+            const savedConfig = cloneConfig(r.config || config);
+            configDraft = savedConfig;
+            configSavedSnapshot = cloneConfig(savedConfig);
             SETTINGS = configDraft.settings || SETTINGS;
             clearConfigDirty();
-            setConfigEditMode(false);
+            updateConfigActionButtons();
+            renderConfigCards();
             log('✅ 配置已保存到 KV，刷新页面后生效', 'success');
             showToast('配置已保存到 KV');
         } catch (e) {
@@ -4351,10 +4475,15 @@ function renderHTML(C, runtimeState = {}) {
             showToast('配置保存失败', 'error');
         } finally {
             const btn = document.getElementById('btn-save-config');
+            const cancelBtn = document.getElementById('btn-cancel-config');
             if (btn) {
                 btn.disabled = false;
-                btn.textContent = '💾 保存改动';
-                if (configDirty) btn.style.display = 'inline-block';
+                btn.textContent = '💾 保存到 KV';
+                btn.style.display = configDirty ? 'inline-block' : 'none';
+            }
+            if (cancelBtn) {
+                cancelBtn.disabled = false;
+                cancelBtn.style.display = configDirty ? 'inline-block' : 'none';
             }
         }
     }
@@ -4367,7 +4496,7 @@ function renderHTML(C, runtimeState = {}) {
             headers.set('Content-Type', 'application/json');
         }
         opts.headers = headers;
-        
+
         const resp = await fetch(path, opts);
         if (resp.status === 401 && AUTH_ENABLED) {
             location.href = '/';
@@ -4375,18 +4504,32 @@ function renderHTML(C, runtimeState = {}) {
         return resp;
     }
 
-    async function savePoolContent(poolKey, pool, mode = 'append') {
-        return apiFetch('/api/save-pool', {
+    async function apiJson(path, options = {}) {
+        return apiFetch(path, options).then(r => r.json());
+    }
+
+    async function apiPostJson(path, body = {}, options = {}) {
+        return apiJson(path, {
+            ...options,
             method: 'POST',
-            body: JSON.stringify({ pool, poolKey, mode })
-        }).then(r => r.json());
+            body: JSON.stringify(body)
+        });
+    }
+
+    async function apiPost(path, options = {}) {
+        return apiFetch(path, { ...options, method: 'POST' });
+    }
+
+    async function apiPostResult(path, options = {}) {
+        return apiPost(path, options).then(r => r.json());
+    }
+
+    async function savePoolContent(poolKey, pool, mode = 'append') {
+        return apiPostJson('/api/save-pool', { pool, poolKey, mode });
     }
 
     async function restoreTrashIPs(ips) {
-        return apiFetch('/api/restore-from-trash', {
-            method: 'POST',
-            body: JSON.stringify({ ips, restoreToSource: true })
-        }).then(r => r.json());
+        return apiPostJson('/api/restore-from-trash', { ips, restoreToSource: true });
     }
 
     function escapeHTML(str) {
@@ -4413,15 +4556,15 @@ function renderHTML(C, runtimeState = {}) {
         w.insertAdjacentHTML('beforeend', output);
         w.scrollTop = w.scrollHeight;
     };
-    
+
     // ===== IP formatting / status table =====
     function normalizeIPFormat(input) {
         if (!input) return null;
-        
+
         input = input.trim();
         const isValidIP = ip => ip.split('.').every(o => { const n = Number(o); return n >= 0 && n <= 255; });
         const isValidPort = port => { const n = Number(port); return n >= 1 && n <= 65535; };
-        
+
         // 分离注释
         let comment = '';
         let mainPart = input;
@@ -4444,29 +4587,29 @@ function renderHTML(C, runtimeState = {}) {
         if (/^[0-9a-fA-F:]+$/.test(mainPart) && mainPart.includes(':')) {
             return \`[\${mainPart.replace(/^\\[/, '').replace(/\\]$/, '')}]:443\${comment}\`;
         }
-        
+
         // 已经是标准格式
         match = mainPart.match(/^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}):(\\d+)$/);
         if (match && isValidIP(match[1]) && isValidPort(match[2])) {
             return \`\${match[1]}:\${match[2]}\${comment}\`;
         }
-        
+
         // 空格分隔
         const parts = mainPart.split(/\\s+/);
         if (parts.length === 2) {
             const ip = parts[0].trim();
             const port = parts[1].trim();
-            
+
             if (/^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$/.test(ip) && /^\\d+$/.test(port) && isValidIP(ip) && isValidPort(port)) {
                 return \`\${ip}:\${port}\${comment}\`;
             }
         }
-        
+
         // 纯IP（默认443端口）
         if (/^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$/.test(mainPart) && isValidIP(mainPart)) {
             return \`\${mainPart}:443\${comment}\`;
         }
-        
+
         // 中文冒号
         match = mainPart.match(/^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})：(\\d+)$/);
         if (match && isValidIP(match[1]) && isValidPort(match[2])) {
@@ -4477,7 +4620,7 @@ function renderHTML(C, runtimeState = {}) {
         if (complexMatch && isValidIP(complexMatch[1]) && isValidPort(complexMatch[2])) {
             return \`\${complexMatch[1]}:\${complexMatch[2]}\${comment}\`;
         }
-        
+
         return null;
     }
 
@@ -4595,7 +4738,7 @@ function renderHTML(C, runtimeState = {}) {
     }
 
     async function checkIPWithInfo(addr) {
-        const r = await apiFetch(\`/api/check-ip?ip=\${encodeURIComponent(addr)}\`).then(r => r.json());
+        const r = await apiJson(\`/api/check-ip?ip=\${encodeURIComponent(addr)}\`);
         return { ip: addr, success: r.success, colo: r.colo || 'N/A', time: r.responseTime || '-', exits: r.exits || [], proxyIP: r.proxyIP, portRemote: r.portRemote, ipInfo: r.ipInfo || null, asn: r.asn, country: r.country, stack: r.stack };
     }
 
@@ -4623,13 +4766,13 @@ function renderHTML(C, runtimeState = {}) {
         currentTargetIndex = parseInt(document.getElementById('domain-select').value);
         const target = TARGETS[currentTargetIndex];
         log(\`切换到: \${target.domain} (\${target.mode})\`);
-        
+
         const manualSection = document.getElementById('manual-add-section');
         manualSection.style.display = 'block';
-        
+
         refreshStatus();
     }
-    
+
     // ===== Pool editor actions =====
     async function loadRemoteUrl() {
         const url = document.getElementById('remote-url').value.trim();
@@ -4637,14 +4780,11 @@ function renderHTML(C, runtimeState = {}) {
             log('❌ 请输入URL', 'error');
             return;
         }
-        
+
         log(\`🌐 加载: \${url}\`, 'warn');
         try {
-            const r = await apiFetch('/api/load-remote-url', {
-                method: 'POST',
-                body: JSON.stringify({ url })
-            }).then(r => r.json());
-            
+            const r = await apiPostJson('/api/load-remote-url', { url });
+
             if (r.success) {
                 document.getElementById('ip-input').value = r.ips || '';
                 updateFilterPreview();
@@ -4656,12 +4796,12 @@ function renderHTML(C, runtimeState = {}) {
             log(\`❌ 出错\`, 'error');
         }
     }
-    
+
     async function loadCurrentPool() {
         log(\`📂 加载 \${currentPool}...\`, 'info');
-        
+
         try {
-            const r = await apiFetch(\`/api/get-pool?poolKey=\${currentPool}\`).then(r => r.json());
+            const r = await apiJson(\`/api/get-pool?poolKey=\${currentPool}\`);
             document.getElementById('ip-input').value = r.pool || '';
             document.getElementById('pool-count').innerText = r.count;
             updateFilterPreview();
@@ -4670,20 +4810,20 @@ function renderHTML(C, runtimeState = {}) {
             log('❌ 加载失败', 'error');
         }
     }
-    
+
     async function saveToCurrentPool(mode = 'append') {
         const content = document.getElementById('ip-input').value;
         if (!content.trim()) {
             log('❌ 内容为空', 'error');
             return;
         }
-        
+
         const modeLabel = mode === 'replace' ? '覆盖' : '追加';
         log(\`💾 \${modeLabel}到 \${getPoolName(currentPool)}...\`, 'warn');
-        
+
         try {
             const r = await savePoolContent(currentPool, content, mode);
-            
+
             if (r.success) {
                 if (mode === 'replace') {
                     log(\`✅ \${r.message}\`, 'success');
@@ -4700,21 +4840,21 @@ function renderHTML(C, runtimeState = {}) {
             log(\`❌ 保存失败\`, 'error');
         }
     }
-    
+
     async function removeFromPool() {
         const content = document.getElementById('ip-input').value;
         if (!content.trim()) {
             log('❌ 内容为空', 'error');
             return;
         }
-        
+
         if (!confirm(\`确认从 \${getPoolName(currentPool)} 中删除这些IP？\`)) return;
-        
+
         log(\`🗑️ 从 \${getPoolName(currentPool)} 删除...\`, 'warn');
-        
+
         try {
             const r = await savePoolContent(currentPool, content, 'remove');
-            
+
             if (r.success) {
                 log(\`✅ \${r.message}\`, 'success');
                 document.getElementById('pool-count').innerText = r.count;
@@ -4727,21 +4867,21 @@ function renderHTML(C, runtimeState = {}) {
             log(\`❌ 删除失败\`, 'error');
         }
     }
-    
+
     async function showPoolInfo() {
         try {
-            const r = await apiFetch(\`/api/get-pool?poolKey=\${currentPool}\`).then(r => r.json());
+            const r = await apiJson(\`/api/get-pool?poolKey=\${currentPool}\`);
             document.getElementById('pool-count').innerText = r.count;
         } catch (e) {
             log('❌ 查询失败', 'error');
         }
     }
-    
+
     async function batchCheck() {
         const btn = document.getElementById('btn-check');
         const input = document.getElementById('ip-input');
         const lines = input.value.split('\\n').filter(i => i.trim());
-        
+
         if (!lines.length) {
             log('❌ 请先输入IP', 'error');
             return 'abandoned';
@@ -4757,49 +4897,49 @@ function renderHTML(C, runtimeState = {}) {
             document.getElementById('pg-bar').style.width = '0%';
             return 'abandoned';
         }
-        
+
         abortController = new AbortController();
         const signal = abortController.signal;
-        
+
         btn.textContent = '🛑 停止检测';
         btn.classList.remove('btn-warning');
         btn.classList.add('btn-danger');
-        
+
         let valid = [], total = lines.length, checked = 0;
         const pg = document.getElementById('pg-bar');
         let checkStatus = 'completed';
-        
+
         log(\`🚀 开始检测 \${total} 个IP (并发: \${SETTINGS.CONCURRENT_CHECKS})\`, 'warn');
         log(\`💡 可随时中断，已验证的有效IP将自动保留\`, 'info');
-        
+
         const chunkSize = SETTINGS.CONCURRENT_CHECKS;
         let wasAborted = false;
-        
+
         try {
             for (let i = 0; i < lines.length; i += chunkSize) {
                 if (signal.aborted) {
                     wasAborted = true;
                     break;
                 }
-                
+
                 const chunk = lines.slice(i, i + chunkSize);
-                
+
                 await Promise.all(chunk.map(async (line) => {
                     if (signal.aborted) return;
-                    
+
                     const item = line.trim();
                     if (!item) return;
-                    
+
                     // 检测是否为域名格式 (example.com 或 example.com:443)
                     const domainMatch = item.match(/^([a-zA-Z0-9][-a-zA-Z0-9.]*\\.[a-zA-Z]{2,}):?(\\d+)?$/);
                     let checkTargets = [];
-                    
+
                     if (domainMatch) {
                         // 域名格式：调用后端解析
                         const domain = domainMatch[1];
                         const port = domainMatch[2] || '443';
                         try {
-                            const data = await apiFetch(\`/api/lookup-domain?domain=\${encodeURIComponent(domain + ':' + port)}\`).then(r => r.json());
+                            const data = await apiJson(\`/api/lookup-domain?domain=\${encodeURIComponent(domain + ':' + port)}\`);
                             if (data.ips && data.ips.length > 0) {
                                 checkTargets = data.ips.map(ip => ip.includes(':') ? \`[\${ip.replace(/^\\[/, '').replace(/\\]$/, '')}]:\${port}\` : \`\${ip}:\${port}\`);
                                 log(\`  🌐 \${domain} → \${data.ips.length} 个IP\`, 'info');
@@ -4826,15 +4966,15 @@ function renderHTML(C, runtimeState = {}) {
                         }
                         checkTargets = [getPoolEntryKey(normalized)];
                     }
-                    
+
                     // 检测所有目标IP
                     for (const checkTarget of checkTargets) {
                         try {
                             const checkUrl = \`/api/check-ip?ip=\${encodeURIComponent(checkTarget)}\`;
-                            const r = await apiFetch(checkUrl, {
+                            const r = await apiJson(checkUrl, {
                                 signal: signal
-                            }).then(r => r.json());
-                            
+                            });
+
                             if (r.success) {
                                 valid.push(buildPoolLineFromCheckResult(checkTarget, r));
                                 log(\`  ✅ \${checkTarget} - \${r.colo} (\${r.responseTime}ms)\`, 'success');
@@ -4847,14 +4987,14 @@ function renderHTML(C, runtimeState = {}) {
                             }
                         }
                     }
-                    
+
                     checked++;
                     if (!signal.aborted) {
                         pg.style.width = (checked / total * 100) + '%';
                     }
                 }));
             }
-            
+
             // 核心改进：无论是否中断，都保留有效IP
             if (valid.length > 0) {
                 input.value = valid.join('\\n');
@@ -4901,7 +5041,7 @@ function renderHTML(C, runtimeState = {}) {
                 }
                 pausedCheckState = null;
             }
-            
+
         } catch (e) {
             if (e.name !== 'AbortError') {
                 log(\`❌ 出错: \${e.message}\`, 'error');
@@ -4930,7 +5070,7 @@ function renderHTML(C, runtimeState = {}) {
         pausedCheckState = null;
         log('🗑️ 输入框已清空', 'info');
     }
-    
+
     // 继续检测
     async function continueCheck() {
         if (!pausedCheckState || pausedCheckState.uncheckedLines.length === 0) {
@@ -4951,7 +5091,7 @@ function renderHTML(C, runtimeState = {}) {
         // 继续检测
         return await batchCheck();
     }
-    
+
     // 放弃检测
     function abandonCheck() {
         if (pausedCheckState && pausedCheckState.validIPs.length > 0) {
@@ -4965,19 +5105,19 @@ function renderHTML(C, runtimeState = {}) {
 
         pausedCheckState = null;
     }
-    
+
     function quickDeduplicate() {
         const input = document.getElementById('ip-input');
         const lines = input.value.split('\\n').filter(l => l.trim());
-        
+
         if (lines.length === 0) {
             log('❌ 输入为空', 'error');
             return;
         }
-        
+
         const before = lines.length;
         const seen = new Map();
-        
+
         // 去重逻辑：IP:PORT 相同即判断为重复，保留最后出现的
         lines.forEach(line => {
             const normalized = normalizeIPFormat(line);
@@ -4987,11 +5127,11 @@ function renderHTML(C, runtimeState = {}) {
                 seen.set(key, normalized);
             }
         });
-        
+
         const unique = Array.from(seen.values());
         input.value = unique.join('\\n');
         updateFilterPreview();
-        
+
         const removed = before - unique.length;
         if (removed > 0) {
             log(\`✅ 去重完成: \${before} → \${unique.length} (移除 \${removed} 个重复)\`, 'success');
@@ -4999,7 +5139,7 @@ function renderHTML(C, runtimeState = {}) {
             log(\`✨ 无重复IP\`, 'info');
         }
     }
-    
+
     // ===== Domain status / lookup / maintenance actions =====
     async function refreshStatus() {
         const t = document.getElementById('status-table');
@@ -5012,10 +5152,10 @@ function renderHTML(C, runtimeState = {}) {
         }
         t.innerHTML = \`<tr><td colspan="\${colspan}" class="text-secondary p-4">🔄 查询中...</td></tr>\`;
         txtDiv.innerHTML = '';
-        
+
         try {
-            const data = await apiFetch(\`/api/current-status?target=\${currentTargetIndex}\`).then(r => r.json());
-            
+            const data = await apiJson(\`/api/current-status?target=\${currentTargetIndex}\`);
+
             if (data.error) {
                 t.innerHTML = \`<tr><td colspan="\${colspan}" class="text-danger p-4">❌ \${escapeHTML(data.error)}<br><small>请检查 CF_KEY, CF_ZONEID 配置</small></td></tr>\`;
                 return;
@@ -5044,7 +5184,7 @@ function renderHTML(C, runtimeState = {}) {
                     ));
                 });
             }
-            
+
             // 显示结果
             if (allRows.length === 0) {
                 t.innerHTML = \`<tr><td colspan="\${colspan}" class="text-secondary p-4">暂无记录</td></tr>\`;
@@ -5055,7 +5195,7 @@ function renderHTML(C, runtimeState = {}) {
             t.innerHTML = \`<tr><td colspan="\${colspan}" class="text-danger p-4">❌ 查询失败<br><small>请检查网络连接和CF配置</small></td></tr>\`;
         }
     }
-    
+
     async function manualAddIP() {
         if (!TARGETS.length) {
             log('❌ 请先添加管理域名', 'error');
@@ -5063,22 +5203,19 @@ function renderHTML(C, runtimeState = {}) {
         }
         const input = document.getElementById('manual-add-ip');
         const ip = input.value.trim();
-        
+
         if (!ip) {
             log('❌ 请输入IP', 'error');
             return;
         }
-        
+
         const target = TARGETS[currentTargetIndex];
 
         log(\`➕ 添加到\${MODE_LABELS[target.mode]}: \${ip}\`, 'info');
-        
+
         try {
-            const r = await apiFetch('/api/add-a-record', {
-                method: 'POST',
-                body: JSON.stringify({ ip, targetIndex: currentTargetIndex })
-            }).then(r => r.json());
-            
+            const r = await apiPostJson('/api/add-a-record', { ip, targetIndex: currentTargetIndex });
+
             if (r.success) {
                 const mode = r.mode || 'A';
                 log(\`✅ 成功添加到\${mode}记录\`, 'success');
@@ -5092,37 +5229,37 @@ function renderHTML(C, runtimeState = {}) {
             log(\`❌ 出错: \${e.message}\`, 'error');
         }
     }
-    
+
     async function lookupDomain() {
         const input = document.getElementById('lookup-domain');
         const val = input.value.trim();
-        
+
         if (!val) {
             log('❌ 请输入', 'error');
             return;
         }
-        
+
         log(\`🔍 探测: \${val}\`, 'info');
-        
+
         const t = document.getElementById('status-table');
         const txtDiv = document.getElementById('txt-status');
         const colspan = '6';
         t.innerHTML = \`<tr><td colspan="\${colspan}" class="text-secondary p-4">🔄 探测中...</td></tr>\`;
         txtDiv.innerHTML = '';
-        
+
         try {
             if (val.startsWith('txt@')) {
-                const data = await apiFetch(\`/api/lookup-domain?domain=\${encodeURIComponent(val)}\`).then(r => r.json());
-                
+                const data = await apiJson(\`/api/lookup-domain?domain=\${encodeURIComponent(val)}\`);
+
                 // null 检查
                 if (!data.ips || !Array.isArray(data.ips)) {
                     log(\`❌ TXT 查询失败\`, 'error');
                     t.innerHTML = \`<tr><td colspan="\${colspan}" class="text-danger p-4">❌ TXT 查询失败</td></tr>\`;
                     return;
                 }
-                
+
                 log(\`📝 TXT: \${data.ips.length} 个IP\`, 'success');
-                
+
                 // 并发检测（与地址记录探测统一模板）
                 const checkResults = await Promise.all(data.ips.map(ip => checkIPWithInfo(ip)));
 
@@ -5130,31 +5267,31 @@ function renderHTML(C, runtimeState = {}) {
                 t.innerHTML = checkResults.map(r => renderIPRow(r,
                     \`<button class="btn btn-sm btn-outline-primary" onclick="addToInput('\${escapeHTML(buildPoolLineFromCheckResult(r.ip, r))}')" title="添加到输入框">➕</button>\`
                 )).join('');
-                
+
                 const activeCount = checkResults.filter(r => r.success).length;
                 log(\`📊 探测完成: \${activeCount}/\${data.ips.length} 活跃\`, activeCount === data.ips.length ? 'success' : (activeCount > 0 ? 'warn' : 'error'));
                 return;
             }
-            
+
             const isIP = /^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(:\\d+)?$/.test(val) || /^\\[[0-9a-fA-F:]+\\](:\\d+)?$/.test(val) || (/^[0-9a-fA-F:]+$/.test(val) && val.includes(':'));
             let targets = [];
-            
+
             if (isIP) {
                 const normalized = normalizeIPFormat(val);
                 targets = [normalized ? getPoolEntryKey(normalized) : val];
             } else {
-                const data = await apiFetch(\`/api/lookup-domain?domain=\${encodeURIComponent(val)}\`).then(r => r.json());
-                
+                const data = await apiJson(\`/api/lookup-domain?domain=\${encodeURIComponent(val)}\`);
+
                 if (!data.ips || !Array.isArray(data.ips) || data.ips.length === 0) {
                     log(\`⚠️ 域名无A/AAAA记录\`, 'warn');
                     t.innerHTML = \`<tr><td colspan="\${colspan}" class="text-secondary p-4">域名无A/AAAA记录</td></tr>\`;
                     return;
                 }
-                
+
                 targets = data.ips.map(ip => ip.includes(':') ? \`[\${ip.replace(/^\\[/, '').replace(/\\]$/, '')}]:\${data.port || '443'}\` : \`\${ip}:\${data.port || '443'}\`);
                 log(\`📡 \${data.ips.length} 个IP (端口: \${data.port || '443'})\`, 'success');
             }
-            
+
             // 并发检测
             const checkResults = await Promise.all(targets.map(addr => checkIPWithInfo(addr)));
 
@@ -5162,7 +5299,7 @@ function renderHTML(C, runtimeState = {}) {
             t.innerHTML = checkResults.map(r => renderIPRow(r,
                 \`<button class="btn btn-sm btn-outline-primary" onclick="addToInput('\${escapeHTML(buildPoolLineFromCheckResult(r.ip, r))}')" title="添加到输入框">➕</button>\`
             )).join('');
-            
+
             const activeCount = checkResults.filter(r => r.success).length;
             log(\`📊 探测完成: \${activeCount}/\${targets.length} 活跃\`, activeCount === targets.length ? 'success' : (activeCount > 0 ? 'warn' : 'error'));
         } catch (e) {
@@ -5170,11 +5307,11 @@ function renderHTML(C, runtimeState = {}) {
             t.innerHTML = \`<tr><td colspan="\${colspan}" class="text-danger p-4">❌ 探测失败</td></tr>\`;
         }
     }
-    
+
     function addToInput(ip) {
         const input = document.getElementById('ip-input');
         const lines = input.value.split('\\n').filter(l => l.trim());
-        
+
         if (!lines.includes(ip)) {
             input.value = lines.concat([ip]).join('\\n');
             updateFilterPreview();
@@ -5183,14 +5320,12 @@ function renderHTML(C, runtimeState = {}) {
             log(\`⚠️  已存在\`, 'warn');
         }
     }
-    
+
     async function deleteRecord(id) {
         if (!confirm('确认删除？')) return;
 
         try {
-            await apiFetch(\`/api/delete-record?id=\${encodeURIComponent(id)}&target=\${currentTargetIndex}\`, {
-                method: 'POST'
-            });
+            await apiPost(\`/api/delete-record?id=\${encodeURIComponent(id)}&target=\${currentTargetIndex}\`);
             log('🗑️  已删除', 'success');
             refreshStatus();
         } catch (e) {
@@ -5202,24 +5337,20 @@ function renderHTML(C, runtimeState = {}) {
         if (!confirm(\`确认删除 \${ip}？\`)) return;
 
         try {
-            await apiFetch(\`/api/delete-record?id=\${encodeURIComponent(recordId)}&ip=\${encodeURIComponent(ip)}&isTxt=true&target=\${currentTargetIndex}\`, {
-                method: 'POST'
-            });
+            await apiPost(\`/api/delete-record?id=\${encodeURIComponent(recordId)}&ip=\${encodeURIComponent(ip)}&isTxt=true&target=\${currentTargetIndex}\`);
             log('🗑️ 已从TXT记录删除', 'success');
             refreshStatus();
         } catch (e) {
             log(\`❌ 删除失败\`, 'error');
         }
     }
-    
+
     async function runMaintain() {
         log('🔧 启动维护...', 'warn');
-        
+
         try {
-            const r = await apiFetch('/api/maintain?manual=true',{
-                method: 'POST'
-            }).then(r => r.json());
-            
+            const r = await apiPostResult('/api/maintain?manual=true');
+
             const allLogs = Array.isArray(r.allLogs)
                 ? r.allLogs
                 : (Array.isArray(r.reports) ? r.reports.flatMap(report => [
@@ -5229,9 +5360,9 @@ function renderHTML(C, runtimeState = {}) {
             if (allLogs.length > 0) {
                 allLogs.forEach(msg => log(msg, 'info', true));
             }
-            
+
             log(\`✅ 维护完成，耗时: \${r.processingTime}ms\`, 'success');
-            
+
             if (r.tgStatus) {
                 switch (r.tgStatus.reason) {
                     case 'success':
@@ -5256,25 +5387,25 @@ function renderHTML(C, runtimeState = {}) {
                         log(\`📱 未发送通知\`, 'info');
                 }
             }
-            
+
             refreshStatus();
             showPoolInfo();
         } catch (e) {
             log(\`❌ 维护失败: \${e.message}\`, 'error');
         }
     }
-    
+
     // ===== Pool mapping / trash / filtering =====
     async function loadDomainPoolMapping() {
         try {
-            const r = await apiFetch('/api/get-domain-pool-mapping').then(r => r.json());
+            const r = await apiJson('/api/get-domain-pool-mapping');
             applyPoolState(r);
             log('✅ 已加载池配置', 'success');
         } catch (e) {
             log('❌ 加载配置失败', 'error');
         }
     }
-    
+
     function updatePoolSelector() {
         const selector = document.getElementById('pool-selector');
         if (!selector) return;
@@ -5294,7 +5425,7 @@ function renderHTML(C, runtimeState = {}) {
     function toggleDomainBindingPanel() {
         setDomainBindingExpanded(!domainBindingExpanded);
     }
-    
+
     function updateDomainBindingTable() {
         const tbody = document.getElementById('domain-binding-list');
         if (!tbody) return;
@@ -5303,13 +5434,13 @@ function renderHTML(C, runtimeState = {}) {
             tbody.innerHTML = '<tr><td colspan="2" class="text-center text-secondary">请先到配置中心添加管理域名</td></tr>';
             return;
         }
-        
+
         tbody.innerHTML = domains.map(domain => {
             const boundPool = domainPoolMapping[domain] || POOL_DEFAULT_KEY;
-            
+
             const selectablePools = (Array.isArray(availablePools) ? availablePools : [POOL_DEFAULT_KEY])
                 .filter(p => p !== POOL_TRASH_KEY);
-            
+
             const options = selectablePools.map(pool => {
                 const selected = pool === boundPool ? 'selected' : '';
                 return \`<option value="\${escapeHTML(pool)}" \${selected}>\${escapeHTML(getPoolName(pool))}</option>\`;
@@ -5328,23 +5459,20 @@ function renderHTML(C, runtimeState = {}) {
             \`;
         }).join('');
     }
-    
+
     async function createNewPool() {
         const name = prompt('输入池显示名称');
         if (!name) return;
         const displayName = name.trim();
-        
+
         if (!displayName) {
             alert('显示名称不能为空!');
             return;
         }
-        
+
         try {
-            const r = await apiFetch('/api/create-pool', {
-                method: 'POST',
-                body: JSON.stringify({ displayName })
-            }).then(r => r.json());
-            
+            const r = await apiPostJson('/api/create-pool', { displayName });
+
             if (r.success) {
                 const createdPoolKey = r.poolKey;
                 currentPool = createdPoolKey;
@@ -5375,10 +5503,7 @@ function renderHTML(C, runtimeState = {}) {
         }
 
         try {
-            const r = await apiFetch('/api/rename-pool', {
-                method: 'POST',
-                body: JSON.stringify({ poolKey: currentPool, displayName })
-            }).then(r => r.json());
+            const r = await apiPostJson('/api/rename-pool', { poolKey: currentPool, displayName });
 
             if (!r.success) {
                 log(\`❌ 重命名失败: \${r.error || '未知错误'}\`, 'error');
@@ -5392,14 +5517,14 @@ function renderHTML(C, runtimeState = {}) {
             log('❌ 重命名失败', 'error');
         }
     }
-    
+
     async function deleteCurrentPool() {
         const protectedPools = [POOL_DEFAULT_KEY, POOL_TRASH_KEY];
         if (protectedPools.includes(currentPool)) {
             alert(\`不能删除\${getPoolName(currentPool)}!\`);
             return;
         }
-        
+
         const boundDomains = Object.entries(domainPoolMapping)
             .filter(([, poolKey]) => poolKey === currentPool)
             .map(([domain]) => domain);
@@ -5412,17 +5537,15 @@ function renderHTML(C, runtimeState = {}) {
             if (boundDomains.length > 5) confirmLines.push(\`...还有 \${boundDomains.length - 5} 个\`);
         }
         if (!confirm(confirmLines.join('\\n'))) return;
-        
+
         try {
-            const r = await apiFetch(\`/api/delete-pool?poolKey=\${currentPool}\`, {
-                method: 'POST'
-            }).then(r => r.json());
-            
+            const r = await apiPostResult(\`/api/delete-pool?poolKey=\${currentPool}\`);
+
             if (!r.success) {
                 log(\`❌ 删除失败: \${r.error || '未知错误'}\`, 'error');
                 return;
             }
-            
+
             currentPool = POOL_DEFAULT_KEY;
             applyPoolState(r);
             log(\`✅ 已删除池\`, 'success');
@@ -5430,11 +5553,11 @@ function renderHTML(C, runtimeState = {}) {
             log('❌ 删除失败', 'error');
         }
     }
-    
+
     function switchPool() {
         currentPool = document.getElementById('pool-selector').value;
         log(\`📦 切换到: \${getPoolName(currentPool)}\`, 'info');
-        
+
         const trashActions = document.getElementById('trash-actions');
         if (trashActions) {
             if (currentPool === POOL_TRASH_KEY) {
@@ -5443,10 +5566,10 @@ function renderHTML(C, runtimeState = {}) {
                 trashActions.style.display = 'none';
             }
         }
-        
+
         showPoolInfo();
     }
-    
+
     async function bindDomainToPool(domain, poolKey) {
         const oldPool = domainPoolMapping[domain] || POOL_DEFAULT_KEY;
         if (oldPool === poolKey) return;
@@ -5465,12 +5588,9 @@ function renderHTML(C, runtimeState = {}) {
             return;
         }
         domainPoolMapping[domain] = poolKey;
-        
+
         try {
-            const r = await apiFetch('/api/save-domain-pool-mapping', {
-                method: 'POST',
-                body: JSON.stringify({ mapping: domainPoolMapping })
-            }).then(r => r.json());
+            const r = await apiPostJson('/api/save-domain-pool-mapping', { mapping: domainPoolMapping });
             if (!r.success) {
                 domainPoolMapping[domain] = oldPool;
                 updateDomainBindingTable();
@@ -5478,7 +5598,7 @@ function renderHTML(C, runtimeState = {}) {
                 return;
             }
             applyPoolState(r);
-            
+
             log(\`✅ \${domain} → \${getPoolName(poolKey)}\`, 'success');
         } catch (e) {
             domainPoolMapping[domain] = oldPool;
@@ -5486,12 +5606,12 @@ function renderHTML(C, runtimeState = {}) {
             log('❌ 绑定失败', 'error');
         }
     }
-    
+
     async function clearTrash() {
         if (!confirm('确认清空垃圾桶？此操作不可恢复！')) return;
-        
+
         try {
-            const r = await apiFetch('/api/clear-trash', { method: 'POST' }).then(r => r.json());
+            const r = await apiPostResult('/api/clear-trash');
             if (r.success) {
                 log('✅ 垃圾桶已清空', 'success');
                 loadCurrentPool();
@@ -5500,25 +5620,25 @@ function renderHTML(C, runtimeState = {}) {
             log('❌ 清空失败', 'error');
         }
     }
-    
+
     // 一键洗库状态
     let cleaningPool = null;
     let cleaningOriginalCount = 0;
-    
+
     // 一键洗库：加载池 → 检测 → 自动保存
     // 普通池：有效IP覆盖保存，失效IP移入垃圾桶
     // 垃圾桶：有效IP恢复到原来的库
     async function oneClickClean() {
         const isTrash = currentPool === POOL_TRASH_KEY;
-        
+
         log(\`🧹 开始一键洗库: \${getPoolName(currentPool)}\`, 'warn');
         cleaningPool = currentPool;
-        
+
         // 1. 加载池
         let allIPs = [];
         let originalLines = []; // 保存原始行（包含注释）
         try {
-            const r = await apiFetch(\`/api/get-pool?poolKey=\${currentPool}\`).then(r => r.json());
+            const r = await apiJson(\`/api/get-pool?poolKey=\${currentPool}\`);
             if (!r.pool || !r.pool.trim()) {
                 log('❌ 池为空，无需清洗', 'error');
                 cleaningPool = null;
@@ -5557,23 +5677,23 @@ function renderHTML(C, runtimeState = {}) {
                 await savePoolCleanResult(validLines, originalLines);
             }
         }
-        
+
         cleaningPool = null;
         cleaningOriginalCount = 0;
     }
-    
+
     // 普通池洗库结果保存：有效IP覆盖保存，失效IP移入垃圾桶
     async function savePoolCleanResult(validLines, originalLines) {
         const validCount = validLines.length;
-        
+
         const validKeys = getPoolKeySet(validLines);
         const invalidLines = filterLinesByKeys(originalLines, validKeys, false);
-        
+
         try {
             // 1. 保存有效IP到池（覆盖）
             if (validCount > 0) {
                 const r = await savePoolContent(cleaningPool, validLines.join('\\n'), 'replace');
-                
+
                 if (r.success) {
                     log(\`✅ 洗库完成: \${r.message}\`, 'success');
                     document.getElementById('pool-count').innerText = r.count;
@@ -5587,26 +5707,26 @@ function renderHTML(C, runtimeState = {}) {
                 log(\`⚠️ 洗库完成，无有效IP，池已清空\`, 'warn');
                 document.getElementById('pool-count').innerText = '0';
             }
-            
+
             // 2. 失效IP移入垃圾桶
             if (invalidLines.length > 0) {
                 const trashContent = invalidLines.map(line => {
                     const key = getNormalizedPoolKey(line);
                     return \`\${key} # 洗库失效 \${new Date().toISOString()} 来自 \${cleaningPool}\`;
                 }).join('\\n');
-                
+
                 await savePoolContent(POOL_TRASH_KEY, trashContent, 'append');
-                
+
                 log(\`🗑️ 已将 \${invalidLines.length} 个失效IP移入垃圾桶\`, 'info');
             }
-            
+
             document.getElementById('ip-input').value = '';
             updateFilterPreview();
         } catch (e) {
             log(\`❌ 保存失败\`, 'error');
         }
     }
-    
+
     // 垃圾桶洗库结果保存：有效IP恢复到原来的库
     async function saveTrashCleanResult(validLines, originalLines) {
         if (validLines.length === 0) {
@@ -5615,13 +5735,13 @@ function renderHTML(C, runtimeState = {}) {
             updateFilterPreview();
             return;
         }
-        
+
         const validKeys = getPoolKeySet(validLines);
         const ipsToRestore = filterLinesByKeys(originalLines, validKeys, true).map(getNormalizedPoolKey);
-        
+
         try {
             const r = await restoreTrashIPs(ipsToRestore);
-            
+
             if (r.success) {
                 log(\`✅ 垃圾桶洗库完成: \${r.message}\`, 'success');
                 logRestoreSummary(r);
@@ -5636,21 +5756,21 @@ function renderHTML(C, runtimeState = {}) {
             log(\`❌ 恢复失败\`, 'error');
         }
     }
-    
+
     async function restoreSelected() {
         const content = document.getElementById('ip-input').value;
         const lines = content.split('\\n').filter(l => l.trim());
-        
+
         if (lines.length === 0) {
             log('❌ 请先选择要恢复的IP', 'error');
             return;
         }
-        
+
         const ips = lines.map(getNormalizedPoolKey).filter(Boolean);
-        
+
         try {
             const r = await restoreTrashIPs(ips);
-            
+
             if (r.success) {
                 log(\`✅ \${r.message}\`, 'success');
                 logRestoreSummary(r);
@@ -5671,22 +5791,22 @@ function renderHTML(C, runtimeState = {}) {
             log(\`   \${item.label || item.name}: \${item.count} 个\`, 'info');
         });
     }
- 
+
     function smartFilter(mode) {
         const input = document.getElementById('ip-input');
         const criteria = parseFilterExpression(getInputValue('universal-filter'));
-        
+
         if (!criteria) {
             log('❌ 请至少填写一个筛选条件', 'error');
             return;
         }
-        
+
         const lines = input.value.split('\\n').filter(l => l.trim());
         const filtered = lines.filter(line => {
             const matched = lineMatchesUniversalFilter(line, criteria);
             return mode === 'keep' ? matched : !matched;
         });
-        
+
         input.value = filtered.join('\\n');
         updateFilterPreview();
         log(\`✅ 筛选完成: \${lines.length} → \${filtered.length}\`, 'success');
@@ -5757,11 +5877,11 @@ function renderHTML(C, runtimeState = {}) {
         const el = document.getElementById('filter-help');
         if (el) el.classList.toggle('active');
     }
-    
+
     function parsePortFilter(portStr) {
         const parts = portStr.split(',').map(p => p.trim()).filter(p => p);
         const result = [];
-        
+
         for (const part of parts) {
             if (part.includes('-')) {
                 const [start, end] = part.split('-').map(p => parseInt(p.trim()));
@@ -5779,15 +5899,14 @@ function renderHTML(C, runtimeState = {}) {
                 return null;
             }
         }
-        
+
         return result.length > 0 ? result : null;
     }
-    
+
     window.addEventListener('DOMContentLoaded', () => {
         log('🚀 系统就绪', 'success');
         log(\`⚙️ 配置: 并发\${SETTINGS.CONCURRENT_CHECKS} | 超时\${SETTINGS.CHECK_TIMEOUT}ms\`, 'info');
         loadAppConfigToForm(INITIAL_APP_CONFIG);
-        setConfigEditMode(false);
         ['ip-input', 'universal-filter'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('input', updateFilterPreview);
@@ -5799,7 +5918,43 @@ function renderHTML(C, runtimeState = {}) {
             loadDomainPoolMapping()
         ]).catch(e => log('⚠️ 初始化部分失败', 'error'));
     });
-</script>
+</script>`;
+}
+
+function renderHTML(C, runtimeState = {}) {
+    const targetsJson = JSON.stringify(C.targets);
+    const settingsJson = JSON.stringify(getRuntimeSettings(C));
+    const appConfigJson = JSON.stringify(getEditableConfig(C));
+    const kvReady = runtimeState.kvReady !== false;
+    const version = APP_VERSION;
+
+    // The Worker is intentionally single-file deployable. Keep front-end code
+    // grouped by the anchors below instead of extracting external assets.
+    const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DDNS Pro - IP管理面板</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🌐</text></svg>">
+    ${renderAppStyles()}
+</head>
+<body class="pb-5">
+
+${renderGithubCorner()}
+
+${renderHero(C, kvReady)}
+
+<div class="container">
+    ${renderTopNav()}
+
+    ${renderDashboardPage()}
+
+    ${renderConfigPage()}
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+${renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnabled: !!C.authKey })}
 <footer class="container text-center text-secondary small py-3">DDNS Pro · ${version}</footer>
 </body>
 </html>`;
