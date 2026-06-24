@@ -155,8 +155,8 @@ ProxyIP 的背景说明可参考：[什么是 ProxyIP?](https://github.com/23112
 | `CF_KEY` | Cloudflare API Token | 空 |
 | `CF_ZONEID` | Cloudflare Zone ID | 空 |
 | `CF_BASE_DOMAIN` | 托管域名，例如 `example.com` | 空 |
-| `CHECK_API` | 主 ProxyIP 检测接口 | `https://api.090227.xyz/check?proxyip=` |
-| `CHECK_API_BACKUP` | 备用检测接口 | 空 |
+| `CHECK_API` | 主 ProxyIP 检测接口 | 空 |
+| `CHECK_API_BACKUP` | 备用检测接口 | `https://checkapi.dvb.kdns.fr/?candidate=` |
 | `DOH_API` | DNS over HTTPS 接口 | `https://cloudflare-dns.com/dns-query` |
 | `TG_TOKEN` | Telegram Bot Token | 空 |
 | `TG_ID` | Telegram Chat ID | 空 |
