@@ -81,8 +81,8 @@ const DEFAULT_CONFIG = {
     tgId: '',                // TG_ID: Telegram Chat ID
 
     // 检测 API 配置
-    checkApi: 'https://api.090227.xyz/check?proxyip=',  // CHECK_API: ProxyIP 检测接口
-    checkApiBackup: '',      // CHECK_API_BACKUP: 备用检测接口
+    checkApi: '',  // CHECK_API: ProxyIP 检测接口
+    checkApiBackup: 'https://checkapi.dvb.kdns.fr/?candidate=',      // CHECK_API_BACKUP: 备用检测接口
 
     // DNS 配置
     dohApi: 'https://cloudflare-dns.com/dns-query',  // DOH_API: DNS over HTTPS 接口
