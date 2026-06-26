@@ -4,7 +4,7 @@
 
 // ==================== Editable configuration ====================
 // Change these values first when tuning runtime behavior.
-const APP_VERSION = '2026.05.23-11.05';
+const APP_VERSION = '2026.06.25-20.14';
 const APP_CONFIG_KEY = 'app_config';
 
 const GLOBAL_SETTINGS = {
@@ -1526,9 +1526,9 @@ function joinMetaValues(values) {
     return unique.length ? unique.join('/') : 'null';
 }
 
-function normalizeCheckResult(data, requestedAddr = '') {
+function normalizeCheckResult(data, requestedAddr = '', apiError = false) {
     if (!data || typeof data !== 'object') {
-        return { success: false, candidate: requestedAddr, proxyIP: '', portRemote: '', responseTime: '-', colo: 'N/A', exits: [], ipInfo: null, asn: 'null', country: 'null', stack: 'null' };
+        return { success: false, candidate: requestedAddr, proxyIP: '', portRemote: '', responseTime: '-', colo: 'N/A', exits: [], ipInfo: null, asn: 'null', country: 'null', stack: 'null', apiError: Boolean(apiError) };
     }
 
     const exits = extractCheckExits(data);
@@ -1565,7 +1565,10 @@ function normalizeCheckResult(data, requestedAddr = '') {
         stack,
         supportsIpv4: stack === 'v4' || stack === 'v4/v6',
         supportsIpv6: stack === 'v6' || stack === 'v4/v6',
-        dualStack: stack === 'v4/v6'
+        dualStack: stack === 'v4/v6',
+        // apiError=true 表示检测接口本身不可用（超时/网络错误/HTTP错误/无法解析JSON），
+        // 不代表该地址被接口判定为失效；data.apiError 用于二次归一化时保留该标记。
+        apiError: Boolean(apiError) || data.apiError === true
     };
 }
 
@@ -1628,7 +1631,7 @@ async function batchCheckIPs(ipList, checkFn, config) {
     const checkSettled = await Promise.allSettled(ipList.map(addr => effectiveCheckFn(addr)));
     const checkResults = checkSettled.map((r, i) => r.status === 'fulfilled'
         ? normalizeCheckResult(r.value, ipList[i])
-        : normalizeCheckResult({ success: false }, ipList[i]));
+        : normalizeCheckResult({ success: false }, ipList[i], true));
 
     return checkResults.map((result, i) => ({
         address: ipList[i],
@@ -1641,10 +1644,10 @@ async function batchCheckIPs(ipList, checkFn, config) {
         ipInfo: result.ipInfo || null,
         asn: result.asn || 'null',
         country: result.country || 'null',
-        stack: result.stack || 'null'
+        stack: result.stack || 'null',
+        apiError: result.apiError || false
     }));
 }
-
 async function getDomainStatus(target, config) {
     const cfConfig = getTargetCFConfig(config, target);
     const result = {
@@ -1666,7 +1669,6 @@ async function getDomainStatus(target, config) {
             return result;
         }
         const records = [...aRecords, ...aaaaRecords];
-        // 批量检测当前地址记录
         const ipList = records.map(r => formatAddr(r.content, target.port));
         const checkResults = await batchCheckIPs(ipList, (addr) => checkProxyIP(addr, config), config);
 
@@ -1685,7 +1687,8 @@ async function getDomainStatus(target, config) {
             asn: checkResults[i].asn,
             country: checkResults[i].country,
             stack: checkResults[i].stack,
-            ipInfo: checkResults[i].ipInfo
+            ipInfo: checkResults[i].ipInfo,
+            apiError: checkResults[i].apiError || false
         }));
     }
 
@@ -1697,8 +1700,6 @@ async function getDomainStatus(target, config) {
         }
         if (records.length > 0) {
             const ips = parseTXTContent(records[0].content);
-
-            // 批量检测 TXT 中的地址
             const checkResults = await batchCheckIPs(ips, (addr) => checkProxyIP(addr, config), config);
 
             const txtChecks = checkResults.map(result => ({
@@ -1713,7 +1714,8 @@ async function getDomainStatus(target, config) {
                 asn: result.asn,
                 country: result.country,
                 stack: result.stack,
-                ipInfo: result.ipInfo
+                ipInfo: result.ipInfo,
+                apiError: result.apiError || false
             }));
 
             result.txtRecords = [{
@@ -1735,24 +1737,34 @@ async function checkProxyIP(input, config) {
     const timeout = getRuntimeSettings(config).CHECK_TIMEOUT;
     const apis = [config.checkApi, config.checkApiBackup].map(api => String(api || '').trim()).filter(Boolean);
     let lastResult = null;
+    // 只要任意一个检测接口返回了可解析的响应（不论判定结果是成功还是失败），
+    // 就说明接口本身可用；allApisErrored 用于区分"接口不可用"和"接口正常但判定失效"。
+    let allApisErrored = true;
 
     for (const apiUrl of apis) {
         try {
             const r = await fetch(buildCheckApiUrl(apiUrl, addr), { signal: AbortSignal.timeout(timeout) });
-            if (!r.ok) continue;
+            if (!r.ok) continue; // HTTP错误，视为接口异常，继续尝试下一个接口
 
             const data = safeJSONParse(await r.text(), null);
-            const result = data && typeof data === 'object' ? normalizeCheckResult(data, addr) : null;
-            if (!result) continue;
+            if (!data || typeof data !== 'object') continue; // 无法解析，视为接口异常
 
+            allApisErrored = false; // 接口本身正常返回了数据
+            const result = normalizeCheckResult(data, addr);
             lastResult = result;
             if (result.success) return result;
         } catch {
-            // 当前接口失败，继续尝试下一个检测接口。
+            // 当前接口超时/网络异常，继续尝试下一个检测接口。
         }
     }
 
-    return lastResult ?? normalizeCheckResult({ success: false }, addr);
+    if (allApisErrored) {
+        // 主备接口均不可用（超时/网络错误/HTTP错误/无法解析JSON），无法判断该地址真实状态，
+        // 标记 apiError=true，调用方应避免据此做删除等破坏性操作。
+        return normalizeCheckResult({ success: false }, addr, true);
+    }
+
+    return lastResult ?? normalizeCheckResult({ success: false }, addr, false);
 }
 
 async function fetchCF(config, path, method = 'GET', body = null) {
@@ -1873,7 +1885,7 @@ async function checkCurrentItems(currentItems, checkFn) {
     const settled = await Promise.allSettled(
         currentItems.map(item => checkFn(item.addr).then(
             result => ({ item, result: normalizeCheckResult(result, item.addr) }),
-            () => ({ item, result: normalizeCheckResult({ success: false }, item.addr) })
+            () => ({ item, result: normalizeCheckResult({ success: false }, item.addr, true) })
         ))
     );
     return settled
@@ -1884,14 +1896,13 @@ async function checkCurrentItems(currentItems, checkFn) {
 function appendCheckDetail(report, item, result) {
     report.checkDetails.push({
         ip: item.addr,
-        status: result.success ? '✅ 活跃' : '❌ 失效',
+        status: result.apiError ? '⚠️ 检测异常' : (result.success ? '✅ 活跃' : '❌ 失效'),
         colo: result.colo || 'N/A',
         time: result.responseTime || '-',
         country: result.country || 'null',
         asn: result.asn || 'null'
     });
 }
-
 function removePoolEntry(poolList, ipAddr) {
     const before = poolList.length;
     const entry = poolList.find(p => extractIPKey(p) === ipAddr) || '';
@@ -1968,17 +1979,30 @@ async function runMaintenanceCore({
             continue;
         }
 
+        if (result.apiError) {
+            // 检测接口本身异常（超时/网络错误/无法解析），无法判断该地址真实状态。
+            // 为避免误删/误清空（尤其是 TXT 模式整条覆写），将其视为"保留现状"，
+            // 计入 activeItems：不删除DNS记录、不放入垃圾桶、不计入待补充缺口。
+            report.apiErrorCount = (report.apiErrorCount || 0) + 1;
+            activeItems.push(getCurrentActiveValue(item, result));
+            addLog(`  ⚠️ ${item.addr} - 检测接口异常，保留现有记录（未删除）`);
+            continue;
+        }
+
         const reason = result.success ? '出口/国家/ASN不匹配' : '检测失效';
         appendMaintenanceIPReport(report.removed, item.addr, result, { reason });
         if (onRemoveCurrent) await onRemoveCurrent(item, result);
 
-        const removed = removePoolEntry(poolList, item.addr);
-        poolList = removed.list;
-        if (removed.removed) {
-            report.poolRemoved++;
-            poolModified = true;
+        if (!result.success) {
+            const removed = removePoolEntry(poolList, item.addr);
+            poolList = removed.list;
+            if (removed.removed) {
+                report.poolRemoved++;
+                poolModified = true;
+            }
+            trashBatch.push({ ipAddr: removed.entry || item.addr, reason: '维护失效', poolKey });
         }
-        trashBatch.push({ ipAddr: removed.entry || item.addr, reason: result.success ? '出口/国家/ASN不匹配' : '维护失效', poolKey });
+
         addLog(formatCurrentRemovedLog
             ? formatCurrentRemovedLog(item, result)
             : (result.success ? `  ❌ ${item.addr} - 出口/国家/ASN不匹配，已移除` : `  ❌ ${item.addr} - 失效已移除，已放入垃圾桶`));
@@ -1998,20 +2022,16 @@ async function runMaintenanceCore({
 
             const result = normalizeCheckResult(await checkFn(candidate.addr), candidate.addr);
             if (!checkResultMatchesTarget(result, target)) {
-                if (result.success) {
+                if (result.apiError) {
+                    report.apiErrorCount = (report.apiErrorCount || 0) + 1;
+                    addLog(`  ⚠️ ${candidate.addr} - 检测接口异常，跳过`);
+                } else if (result.success) {
                     const refreshed = refreshPoolEntryMetadata(poolList, item, candidate.addr, result);
                     poolList = refreshed.poolList;
                     poolModified = poolModified || refreshed.modified;
                     addLog(`  ⏭️ ${candidate.addr} - 出口/国家/ASN不匹配`);
                 } else {
-                    const removed = removePoolEntry(poolList, candidate.addr);
-                    poolList = removed.list;
-                    if (removed.removed) {
-                        report.poolRemoved++;
-                        poolModified = true;
-                    }
-                    trashBatch.push({ ipAddr: removed.entry || candidate.addr, reason: '补充检测失败', poolKey });
-                    addLog(`  ❌ ${candidate.addr} - 检测失败，从池中移除并放入垃圾桶`);
+                    addLog(`  ⏭️ ${candidate.addr} - 检测失败，跳过`);
                 }
                 continue;
             }
@@ -2033,13 +2053,13 @@ async function runMaintenanceCore({
 
         if (activeItems.length < target.minActive) {
             report.poolExhausted = true;
-            addLog(`⚠️ ${getPoolFixedName(poolKey)} 库存不足，无法达到最小活跃数 ${target.minActive}`);
+            const apiErrNote = report.apiErrorCount ? `（检测接口异常 ${report.apiErrorCount} 次，部分记录/候选可能未被正确判定）` : '';
+            addLog(`⚠️ ${getPoolFixedName(poolKey)} 库存不足，无法达到最小活跃数 ${target.minActive}${apiErrNote}`);
         }
     }
 
     return { activeItems, poolList, poolModified, trashBatch };
 }
-
 async function finalizeMaintenanceCore(env, poolKey, report, state, config) {
     await savePoolAndTrash(env, poolKey, state.poolList, state.poolModified, state.trashBatch, config);
     report.poolAfterCount = state.poolList.length;
@@ -2208,6 +2228,7 @@ async function maintainAllDomains(env, isManual = false, config) {
             removed: [],
             poolRemoved: 0,
             poolExhausted: false,
+            apiErrorCount: 0,
             poolKeyUsed: '',
             poolDisplayName: '',
             configError: false,
@@ -2264,8 +2285,11 @@ async function maintainAllDomains(env, isManual = false, config) {
         r.afterActive < r.minActive && r.poolExhausted
     );
 
-    // 通知条件：手动执行 OR IP变化 OR 活跃数不足 OR 配置错误
-    const shouldNotify = isManual || hasIPChanges || hasInsufficientActive || hasConfigError;
+    // 4. 检查是否有检测接口异常（超时/网络错误/无法解析），与"IP真实失效"区分开来
+    const hasApiError = allReports.some(r => (r.apiErrorCount || 0) > 0);
+
+    // 通知条件：手动执行 OR IP变化 OR 活跃数不足 OR 配置错误 OR 检测接口异常
+    const shouldNotify = isManual || hasIPChanges || hasInsufficientActive || hasConfigError || hasApiError;
 
     let tgResult = { sent: false, reason: 'no_need' };
     if (shouldNotify && config.tgEnabled !== false) {
@@ -2299,9 +2323,10 @@ function formatReportMeta(item = {}) {
     return parts.length ? parts.join(' · ') : '无详情';
 }
 
-function formatIPChanges(added, removed, port = '', minActive = 0, afterActive = 0) {
+function formatIPChanges(report) {
+    const { added = [], removed = [], port, minActive = 0, afterActive = 0, poolExhausted, apiErrorCount } = report;
     let msg = '';
-    if (added && added.length > 0) {
+    if (added.length > 0) {
         msg += `📈 新增 ${added.length} 个IP\n`;
         added.forEach(item => {
             const displayIP = hasExplicitPort(item.ip) ? item.ip : parseAddr(item.ip, port || '443').address;
@@ -2309,7 +2334,7 @@ function formatIPChanges(added, removed, port = '', minActive = 0, afterActive =
             msg += `      ${formatReportMeta(item)}\n`;
         });
     }
-    if (removed && removed.length > 0) {
+    if (removed.length > 0) {
         msg += `📉 移除 ${removed.length} 个IP\n`;
         removed.forEach(item => {
             msg += `   ❌ <code>${item.ip}</code>\n`;
@@ -2317,10 +2342,17 @@ function formatIPChanges(added, removed, port = '', minActive = 0, afterActive =
             msg += `      原因: ${item.reason}\n`;
         });
     }
-    if ((!added || added.length === 0) && (!removed || removed.length === 0)) {
+    if (added.length === 0 && removed.length === 0) {
         msg += `✨ 所有IP正常，无变化\n`;
     }
-    msg += `✅ 完成: ${afterActive}/${minActive}\n`;
+    const reachedTarget = afterActive >= minActive;
+    msg += `${reachedTarget ? '✅' : '❌'} 完成: ${afterActive}/${minActive}\n`;
+    if (!reachedTarget && poolExhausted) {
+        msg += `⚠️ 候选IP不足，未能补满最小活跃数\n`;
+    }
+    if (apiErrorCount) {
+        msg += `⚠️ 检测接口异常 ${apiErrorCount} 次，部分IP状态未能判定（未做删除/替换）\n`;
+    }
     return msg;
 }
 
@@ -2342,6 +2374,11 @@ async function sendTG(reports, poolStats, isManual, config) {
         msg += `⚠️ <b>警告: 检测到配置错误</b>\n请检查 CF_KEY, CF_ZONEID 是否正确配置\n\n`;
     }
 
+    const totalApiErrors = reports.reduce((sum, r) => sum + (r.apiErrorCount || 0), 0);
+    if (totalApiErrors > 0) {
+        msg += `⚠️ <b>警告: 检测接口异常 ${totalApiErrors} 次</b>\n部分IP本轮未能判定真实状态，已跳过处理（未删除/未替换），请检查 CHECK_API / CHECK_API_BACKUP 是否可用\n\n`;
+    }
+
     reports.forEach((report, index) => {
         if (index > 0) msg += `\n`;
         msg += `━━ <code>${report.domain}</code> ━━\n`;
@@ -2358,18 +2395,14 @@ async function sendTG(reports, poolStats, isManual, config) {
         // 检测详情
         if (report.checkDetails && report.checkDetails.length > 0) {
             report.checkDetails.forEach(d => {
-                const icon = d.status.includes('✅') ? '✅' : '❌';
+                const icon = d.status.includes('✅') ? '✅' : (d.status.includes('⚠️') ? '⚠️' : '❌');
                 msg += `${icon} <code>${d.ip}</code>\n   ${formatReportMeta(d)}\n`;
             });
             msg += `\n`;
         }
 
-        if (report.mode === 'A') {
-            msg += formatIPChanges(report.added, report.removed, report.port, report.minActive, report.afterActive);
-        }
-
-        if (report.mode === 'TXT') {
-            msg += formatIPChanges(report.added, report.removed, '', report.minActive, report.afterActive);
+        if (report.mode === 'A' || report.mode === 'TXT') {
+            msg += formatIPChanges(report);
         }
     });
 
@@ -3167,6 +3200,10 @@ function renderAppStyles() {
         .status-badge.bad {
             color: #991b1b;
             background: #fee2e2;
+        }
+        .status-badge.warn {
+            color: #92400e;
+            background: #fef3c7;
         }
         .pill-badge, .latency-badge, .colo-badge {
             display: inline-flex;
@@ -4803,23 +4840,24 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
     }
 
     async function checkIPWithInfo(addr) {
-        const r = await apiJson(\`/api/check-ip?ip=\${encodeURIComponent(addr)}\`);
-        return { ip: addr, success: r.success, colo: r.colo || 'N/A', time: r.responseTime || '-', exits: r.exits || [], proxyIP: r.proxyIP, portRemote: r.portRemote, ipInfo: r.ipInfo || null, asn: r.asn, country: r.country, stack: r.stack };
+    const r = await apiJson(\`/api/check-ip?ip=\${encodeURIComponent(addr)}\`);
+    return { ip: addr, success: r.success, colo: r.colo || 'N/A', time: r.responseTime || '-', exits: r.exits || [], proxyIP: r.proxyIP, portRemote: r.portRemote, ipInfo: r.ipInfo || null, asn: r.asn, country: r.country, stack: r.stack, apiError: r.apiError || false };
     }
-
     const addProbeButton = r => \`<button class="btn btn-sm btn-outline-primary" onclick="addToInput('\${escapeHTML(buildPoolLineFromCheckResult(r.ip, r))}')" title="添加到输入框">➕</button>\`;
 
     function renderIPRow(r, actionHTML) {
-        const infoHtml = formatExitInfo(r.exits) || (r.ipInfo ? formatIPInfo(r.ipInfo) : '-');
-        return \`<tr>
-            <td><span class="pill-badge address-pill copyable" onclick="copyText('\${escapeJSString(r.ip)}', '维护地址')" title="点击复制">\${escapeHTML(r.ip)}</span></td>
-            <td><span class="colo-badge" title="Cloudflare 机房 / colo">\${escapeHTML(r.colo || 'N/A')}</span></td>
-            <td><span class="latency-badge" title="来自后端检测 API 返回的 responseTime，不是浏览器到节点的延迟">\${escapeHTML(formatLatencyValue(r.time))}</span></td>
-            <td><span class="status-badge \${r.success?'ok':'bad'}">\${r.success?'可用':'失败'}</span></td>
-            <td class="exit-list-cell">\${infoHtml}</td>
-            <td>\${actionHTML}</td>
-        </tr>\`;
-    }
+    const infoHtml = formatExitInfo(r.exits) || (r.ipInfo ? formatIPInfo(r.ipInfo) : '-');
+    const statusClass = r.apiError ? 'warn' : (r.success ? 'ok' : 'bad');
+    const statusText = r.apiError ? '⚠️ 异常' : (r.success ? '可用' : '失败');
+    return \`<tr>
+        <td><span class="pill-badge address-pill copyable" onclick="copyText('\${escapeJSString(r.ip)}', '维护地址')" title="点击复制">\${escapeHTML(r.ip)}</span></td>
+        <td><span class="colo-badge" title="Cloudflare 机房 / colo">\${escapeHTML(r.colo || 'N/A')}</span></td>
+        <td><span class="latency-badge" title="来自后端检测 API 返回的 responseTime，不是浏览器到节点的延迟">\${escapeHTML(formatLatencyValue(r.time))}</span></td>
+        <td><span class="status-badge \${statusClass}">\${statusText}</span></td>
+        <td class="exit-list-cell">\${infoHtml}</td>
+        <td>\${actionHTML}</td>
+    </tr>\`;
+}
 
     async function renderProbeResults(targets, total = targets.length) {
         const checkResults = await Promise.all(targets.map(addr => checkIPWithInfo(addr)));
