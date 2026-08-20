@@ -4,7 +4,7 @@
 
 // ==================== Editable configuration ====================
 // Change these values first when tuning runtime behavior.
-const APP_VERSION = '2026.07.29-01.21';
+const APP_VERSION = '2026.08.19-14.12';
 const APP_CONFIG_KEY = 'app_config';
 const GLOBAL_SETTINGS = {
     // ── IP 检测 ──
@@ -265,7 +265,9 @@ function normalizeStackFilter(value) {
 const POOL_DEFAULT_KEY = 'ip_pool_default';
 const POOL_TRASH_KEY = 'ip_pool_trash';
 const POOL_NAMES_KEY = 'ip_pool_names';
+const POOL_ORDER_KEY = 'ip_pool_order';
 const DOMAIN_POOL_MAPPING_KEY = 'domain_pool_mapping';
+const DOMAIN_POOL_ORDER_KEY = 'domain_pool_order';
 const NUMBERED_POOL_KEY_RE = /^ip_pool_(\d{3})$/;
 function getPoolFixedName(poolKey) {
     if (poolKey === POOL_DEFAULT_KEY) return '默认池';
@@ -305,6 +307,68 @@ async function writePoolDisplayNames(env, names) {
     await env.IP_DATA.put(POOL_NAMES_KEY, JSON.stringify(names || {}));
 }
 
+async function readPoolOrder(env) {
+    const order = safeJSONParse(await env.IP_DATA.get(POOL_ORDER_KEY), null);
+    return Array.isArray(order) ? order : null;
+}
+
+async function writePoolOrder(env, order) {
+    await env.IP_DATA.put(POOL_ORDER_KEY, JSON.stringify(order || []));
+}
+async function readDomainPoolOrder(env) {
+    const order = safeJSONParse(await env.IP_DATA.get(DOMAIN_POOL_ORDER_KEY), null);
+    return Array.isArray(order) ? order : null;
+}
+
+async function writeDomainPoolOrder(env, order) {
+    await env.IP_DATA.put(DOMAIN_POOL_ORDER_KEY, JSON.stringify(order || []));
+}
+
+function normalizeDomainPoolOrder(order, actualTargets) {
+    const targets = [...new Set((actualTargets || []).filter(Boolean))];
+    const savedOrder = Array.isArray(order) ? order : targets;
+    const actualSet = new Set(targets);
+    const normalized = [];
+    for (const targetKey of savedOrder) {
+        if (actualSet.has(targetKey) && !normalized.includes(targetKey)) normalized.push(targetKey);
+    }
+    for (const targetKey of targets) {
+        if (!normalized.includes(targetKey)) normalized.push(targetKey);
+    }
+    return normalized;
+}
+
+async function getConfiguredTargetKeys(env) {
+    try {
+        const rawConfig = safeJSONParse(await env.IP_DATA.get(APP_CONFIG_KEY), {});
+        const config = normalizeSavedConfig(rawConfig);
+        return config.targets.map(getTargetDuplicateKey).filter(Boolean);
+    } catch {
+        return [];
+    }
+}
+function normalizePoolOrder(order, actualPools) {
+    const pools = [...new Set(actualPools.filter(isPoolDataKey))];
+    const fallback = [...pools].sort(comparePoolKeys);
+    const savedOrder = Array.isArray(order) ? order : fallback;
+
+    const actualSet = new Set(pools);
+    const normalized = [];
+    for (const poolKey of savedOrder) {
+        if (actualSet.has(poolKey) && !normalized.includes(poolKey)) normalized.push(poolKey);
+    }
+    for (const poolKey of fallback) {
+        if (!normalized.includes(poolKey)) normalized.push(poolKey);
+    }
+
+    const userPools = normalized.filter(poolKey => ![POOL_DEFAULT_KEY, POOL_TRASH_KEY].includes(poolKey));
+    return [
+        ...(actualSet.has(POOL_DEFAULT_KEY) ? [POOL_DEFAULT_KEY] : []),
+        ...userPools,
+        ...(actualSet.has(POOL_TRASH_KEY) ? [POOL_TRASH_KEY] : [])
+    ];
+}
+
 async function readDomainPoolMapping(env) {
     const mapping = safeJSONParse(await env.IP_DATA.get(DOMAIN_POOL_MAPPING_KEY), {});
     return mapping && typeof mapping === 'object' && !Array.isArray(mapping) ? mapping : {};
@@ -314,9 +378,9 @@ async function listPoolKeys(env) {
     await ensurePoolDefaults(env);
     const allKeys = await env.IP_DATA.list();
     const pools = allKeys.keys.map(k => k.name).filter(isPoolDataKey);
-    if (!pools.includes(POOL_DEFAULT_KEY)) pools.unshift(POOL_DEFAULT_KEY);
+    if (!pools.includes(POOL_DEFAULT_KEY)) pools.push(POOL_DEFAULT_KEY);
     if (!pools.includes(POOL_TRASH_KEY)) pools.push(POOL_TRASH_KEY);
-    return [...new Set(pools)].sort(comparePoolKeys);
+    return normalizePoolOrder(await readPoolOrder(env), pools);
 }
 
 async function ensurePoolDefaults(env) {
@@ -326,12 +390,19 @@ async function ensurePoolDefaults(env) {
 
 async function getPoolState(env) {
     await ensurePoolDefaults(env);
-    const [mapping, pools, poolNames] = await Promise.all([
+    const [mapping, pools, poolNames, targetKeys, savedDomainOrder] = await Promise.all([
         readDomainPoolMapping(env),
         listPoolKeys(env),
-        readPoolDisplayNames(env)
+        readPoolDisplayNames(env),
+        getConfiguredTargetKeys(env),
+        readDomainPoolOrder(env)
     ]);
-    return { mapping, pools, poolNames };
+    return {
+        mapping,
+        pools,
+        poolNames,
+        domainPoolOrder: normalizeDomainPoolOrder(savedDomainOrder, targetKeys)
+    };
 }
 
 function poolListToMap(pool) {
@@ -529,6 +600,7 @@ const withEnv = handler => (url, request, env) => handler(env);
 const withConfig = handler => (url, request, env, config) => handler(config);
 const withJsonEnv = handler => withJsonBody((body, url, env) => handler(body, env));
 const withJsonConfig = handler => withJsonBody((body, url, env, config) => handler(body, config));
+const withJsonEnvConfig = handler => withJsonBody((body, url, env, config) => handler(body, env, config));
 
 const GET_API_ROUTES = {
     '/api/get-pool': withUrlEnv(handleGetPool),
@@ -541,11 +613,13 @@ const GET_API_ROUTES = {
 
 const POST_API_ROUTES = {
     '/api/save-pool': withJsonEnv(handleSavePool),
+    '/api/save-pool-order': withJsonEnv(handleSavePoolOrder),
     '/api/load-remote-url': withJsonConfig(handleLoadRemoteUrl),
     '/api/delete-record': withUrlConfig(handleDeleteRecord),
     '/api/add-a-record': withJsonConfig(handleAddARecord),
     '/api/maintain': withUrlEnvConfig(handleMaintain),
     '/api/save-domain-pool-mapping': withJsonEnv(handleSaveDomainPoolMapping),
+    '/api/save-domain-pool-order': withJsonEnvConfig(handleSaveDomainPoolOrder),
     '/api/create-pool': withJsonEnv(handleCreatePool),
     '/api/rename-pool': withJsonEnv(handleRenamePool),
     '/api/delete-pool': withUrlEnv(handleDeletePool),
@@ -586,6 +660,25 @@ async function handleGetPool(url, env) {
         return jsonResponse({ count });
     }
     return jsonResponse({ pool, count });
+}
+
+async function handleSavePoolOrder(body, env) {
+    await ensurePoolDefaults(env);
+    const order = body.order;
+    if (!Array.isArray(order)) {
+        return badRequest({ success: false, error: '排序数据格式无效' });
+    }
+
+    const actualPools = await listPoolKeys(env);
+    const actualSet = new Set(actualPools);
+    const submitted = [...new Set(order)];
+    if (submitted.length !== actualPools.length || submitted.some(poolKey => !actualSet.has(poolKey))) {
+        return badRequest({ success: false, error: '池列表已变化，请刷新后重试' });
+    }
+
+    const normalized = normalizePoolOrder(submitted, actualPools);
+    await writePoolOrder(env, normalized);
+    return jsonResponse({ success: true, ...(await getPoolState(env)) });
 }
 
 async function handleSavePool(body, env) {
@@ -815,6 +908,24 @@ async function handleSaveDomainPoolMapping(body, env) {
     return jsonResponse({ success: true, ...(await getPoolState(env)) });
 }
 
+async function handleSaveDomainPoolOrder(body, env, config) {
+    await ensurePoolDefaults(env);
+    if (!Array.isArray(body.order)) {
+        return badRequest({ success: false, error: '排序数据格式无效' });
+    }
+
+    const actualTargets = (config.targets || []).map(getTargetDuplicateKey).filter(Boolean);
+    const actualSet = new Set(actualTargets);
+    const submitted = [...new Set(body.order)];
+    if (submitted.length !== actualTargets.length || submitted.some(targetKey => !actualSet.has(targetKey))) {
+        return badRequest({ success: false, error: '管理域名列表已变化，请刷新后重试' });
+    }
+
+    const normalized = normalizeDomainPoolOrder(submitted, actualTargets);
+    await writeDomainPoolOrder(env, normalized);
+    return jsonResponse({ success: true, ...(await getPoolState(env)) });
+}
+
 async function handleCreatePool(body, env) {
     await ensurePoolDefaults(env);
     const displayName = String(body.displayName || '').trim();
@@ -837,6 +948,11 @@ async function handleCreatePool(body, env) {
     }
 
     await env.IP_DATA.put(poolKey, '');
+    const poolOrder = await readPoolOrder(env);
+    if (poolOrder) {
+        poolOrder.push(poolKey);
+        await writePoolOrder(env, normalizePoolOrder(poolOrder, [...pools, poolKey]));
+    }
     const poolNames = await readPoolDisplayNames(env);
     poolNames[poolKey] = displayName;
     await writePoolDisplayNames(env, poolNames);
@@ -889,6 +1005,8 @@ async function handleDeletePool(url, env) {
 
     try {
         await env.IP_DATA.delete(poolKey);
+        const poolOrder = await readPoolOrder(env);
+        if (poolOrder) await writePoolOrder(env, poolOrder.filter(key => key !== poolKey));
         const poolNames = await readPoolDisplayNames(env);
         delete poolNames[poolKey];
         await writePoolDisplayNames(env, poolNames);
@@ -1054,6 +1172,18 @@ async function handleSaveConfig(body, env) {
         return badRequest({ success: false, error: duplicateError });
     }
     await env.IP_DATA.put(APP_CONFIG_KEY, JSON.stringify(normalized));
+
+    const existingDomainOrder = await readDomainPoolOrder(env);
+    if (existingDomainOrder) {
+        await writeDomainPoolOrder(
+            env,
+            normalizeDomainPoolOrder(
+                existingDomainOrder,
+                normalized.targets.map(getTargetDuplicateKey).filter(Boolean)
+            )
+        );
+    }
+
     return jsonResponse({ success: true, config: normalized });
 }
 
@@ -3183,6 +3313,12 @@ function renderAppStyles() {
         .domain-binding-header h6 {
             min-width: 0;
         }
+        .domain-binding-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
         .domain-binding-table-wrap {
             max-height: 280px;
             overflow: auto;
@@ -3676,12 +3812,82 @@ function renderAppStyles() {
         .custom-modal-buttons .btn-abandon:hover {
             background: #e5e5e7;
         }
+        .pool-order-modal {
+            max-width: 520px;
+        }
+        .pool-order-hint {
+            color: #6b7280;
+            font-size: 13px;
+            margin: -8px 0 12px;
+        }
+        .pool-order-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: min(55vh, 460px);
+            overflow-y: auto;
+            margin-bottom: 18px;
+            padding-right: 3px;
+        }
+        .pool-order-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            background: #f9fafb;
+        }
+        .pool-order-index {
+            width: 24px;
+            color: #9ca3af;
+            font-size: 12px;
+            text-align: center;
+            flex: 0 0 auto;
+        }
+        .pool-order-name {
+            min-width: 0;
+            flex: 1;
+        }
+        .pool-order-name strong,
+        .pool-order-name small {
+            display: block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .pool-order-name small {
+            color: #9ca3af;
+            margin-top: 2px;
+        }
+        .pool-order-actions {
+            display: flex;
+            gap: 5px;
+        }
+        .pool-order-actions button {
+            width: 34px;
+            height: 32px;
+            padding: 0;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            background: #fff;
+            color: #374151;
+            cursor: pointer;
+        }
+        .pool-order-actions button:hover:not(:disabled) {
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+        .pool-order-actions button:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+        }
 
         @media (max-width: 768px) {
             .pool-tools {
                 width: 100%;
                 display: grid;
-                grid-template-columns: minmax(0, 1fr) repeat(4, 38px);
+                grid-template-columns: minmax(0, 1fr) repeat(5, 38px);
             }
             .pool-tools .form-select {
                 width: 100%;
@@ -3974,6 +4180,7 @@ function renderDashboardPage() {
                         </select>
                         <button class="btn btn-sm" onclick="createNewPool()" title="新建池" style="padding:6px 8px">➕</button>
                         <button class="btn btn-sm" onclick="renameCurrentPool()" title="重命名池" style="padding:6px 8px">✏️</button>
+                        <button class="btn btn-sm" onclick="openPoolOrderDialog()" title="自定义池排序" style="padding:6px 8px">↕️</button>
                         <button class="btn btn-sm" onclick="deleteCurrentPool()" title="删除池" style="padding:6px 8px">🗑️</button>
                         <button class="btn btn-sm" onclick="oneClickClean()" title="一键洗库" style="padding:6px 8px">🧹</button>
                     </div>
@@ -4038,7 +4245,10 @@ function renderDashboardPage() {
             <details id="domain-binding-card" class="card p-4 mb-3 domain-binding-card">
                 <summary class="domain-binding-header" title="点击展开/折叠域名池绑定">
                     <h6 class="m-0 fw-bold">🔗 域名池绑定</h6>
-                    <button class="btn btn-sm btn-outline-primary" onclick="event.preventDefault(); event.stopPropagation(); loadDomainPoolMapping()" title="刷新">🔄</button>
+                    <div class="domain-binding-actions" onclick="event.stopPropagation()">
+                        <button class="btn btn-sm btn-outline-primary" onclick="event.preventDefault(); loadDomainPoolMapping()" title="刷新">🔄</button>
+                        <button class="btn btn-sm btn-outline-primary" onclick="event.preventDefault(); openDomainPoolOrderDialog()" title="自定义绑定显示顺序">↕️</button>
+                    </div>
                 </summary>
                 <div class="domain-binding-table-wrap">
                     <table class="table table-sm">
@@ -4091,6 +4301,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
     let currentPool = POOL_DEFAULT_KEY;
     let abortController = null;
     let domainPoolMapping = {};
+    let domainPoolOrder = [];
     let availablePools = [POOL_DEFAULT_KEY];
     let poolDisplayNames = {};
     let toastTimer = null;
@@ -4203,6 +4414,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         domainPoolMapping = state.mapping && typeof state.mapping === 'object' && !Array.isArray(state.mapping) ? state.mapping : {};
         availablePools = Array.isArray(state.pools) && state.pools.length ? state.pools : [POOL_DEFAULT_KEY, POOL_TRASH_KEY];
         poolDisplayNames = state.poolNames && typeof state.poolNames === 'object' && !Array.isArray(state.poolNames) ? state.poolNames : {};
+        if (Array.isArray(state.domainPoolOrder)) domainPoolOrder = state.domainPoolOrder;
         if (!availablePools.includes(currentPool)) currentPool = POOL_DEFAULT_KEY;
         updatePoolSelector();
         updateDomainBindingTable();
@@ -4426,13 +4638,20 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
     }
 
     function editZoneConfig(index) {
+        const panel = byId('zone-edit-panel');
+        const editorKey = 'zone:' + index;
+        if (panel?.classList.contains('active') && panel.dataset.editorKey === editorKey) {
+            closeConfigEditor('zone');
+            return;
+        }
         showZoneEditor(index, getDraftZones()[index] || {});
     }
 
-    function openConfigEditor(type, title, content) {
+    function openConfigEditor(type, title, content, editorKey = '') {
         const panel = byId(type === 'zone' ? 'zone-edit-panel' : 'target-edit-panel');
         if (!panel) return null;
         panel.classList.add('active');
+        panel.dataset.editorKey = editorKey;
         panel.innerHTML = '<h6 class="mb-3 fw-bold">' + title + '</h6>' + content;
         panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         return panel;
@@ -4461,7 +4680,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
             renderField('input', { id: 'edit-zone-id', label: 'Zone ID', hint: 'Cloudflare 区域 ID。', value: zone.zoneId || '', placeholder: 'Zone ID' }),
             '<label class="field span-2"><span>CF Key</span><small>需要 DNS 编辑权限。</small><input id="edit-zone-key" class="form-control form-control-sm" value="' + escapeHTML(zone.apiKey || '') + '" placeholder="CF API Token"></label>'
         ].join('');
-        openConfigEditor('zone', (index >= getDraftZones().length ? '添加' : '编辑') + '权限配置', '<div class="config-edit-grid">' + zoneFields + '</div>' + renderEditorActions('zone', 'commitZoneEditor(' + index + ')'));
+        openConfigEditor('zone', (index >= getDraftZones().length ? '添加' : '编辑') + '权限配置', '<div class="config-edit-grid">' + zoneFields + '</div>' + renderEditorActions('zone', 'commitZoneEditor(' + index + ')'), 'zone:' + index);
     }
 
     function commitZoneEditor(index) {
@@ -4501,6 +4720,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         const panel = byId(type === 'zone' ? 'zone-edit-panel' : 'target-edit-panel');
         if (panel) {
             panel.classList.remove('active');
+            delete panel.dataset.editorKey;
             panel.innerHTML = '';
         }
     }
@@ -4564,6 +4784,12 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
     }
 
     function editTargetConfig(index) {
+        const panel = byId('target-edit-panel');
+        const editorKey = 'target:' + index;
+        if (panel?.classList.contains('active') && panel.dataset.editorKey === editorKey) {
+            closeConfigEditor('target');
+            return;
+        }
         showTargetEditor(index, (getDraftTargets()[index] || {}));
     }
 
@@ -4590,7 +4816,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
             + '<label class="field"><span>端口</span><small id="edit-target-port-hint">A/AAAA 模式使用，TXT 为任意。</small><input id="edit-target-port" class="form-control form-control-sm" value="' + escapeHTML(portValue) + '" data-a-port="' + escapeHTML(previousAPort) + '" placeholder="443"></label>'
             + '</div><input type="hidden" id="edit-target-enabled" value="' + (target.enabled !== false ? 'true' : 'false') + '">'
             + renderEditorActions('target', 'commitTargetEditor(' + index + ')');
-        openConfigEditor('target', (index >= (configDraft?.targets || []).length ? '添加' : '编辑') + '管理域名', targetContent);
+        openConfigEditor('target', (index >= (configDraft?.targets || []).length ? '添加' : '编辑') + '管理域名', targetContent, 'target:' + index);
         syncTargetPortMode();
     }
 
@@ -5646,11 +5872,29 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
     function updatePoolSelector() {
         const selector = byId('pool-selector');
         if (!selector) return;
-        const pools = [...new Set([POOL_DEFAULT_KEY, POOL_TRASH_KEY, ...(Array.isArray(availablePools) ? availablePools : [])])]
-            .sort(comparePoolKeys);
+        const source = [...new Set(Array.isArray(availablePools) ? availablePools : [])];
+        const pools = [
+            POOL_DEFAULT_KEY,
+            ...source.filter(pool => ![POOL_DEFAULT_KEY, POOL_TRASH_KEY].includes(pool)),
+            POOL_TRASH_KEY
+        ];
 
         selector.innerHTML = pools.map(pool => \`<option value="\${escapeHTML(pool)}">\${escapeHTML(getPoolName(pool))}</option>\`).join('');
         selector.value = currentPool;
+    }
+
+    function getOrderedDomainTargets() {
+        const targets = TARGETS.filter(target => target && typeof target === 'object');
+        const targetKeys = targets.map(getTargetDuplicateKey).filter(Boolean);
+        const normalized = [];
+        for (const targetKey of (Array.isArray(domainPoolOrder) ? domainPoolOrder : [])) {
+            if (targetKeys.includes(targetKey) && !normalized.includes(targetKey)) normalized.push(targetKey);
+        }
+        for (const targetKey of targetKeys) {
+            if (!normalized.includes(targetKey)) normalized.push(targetKey);
+        }
+        const targetMap = new Map(targets.map(target => [getTargetDuplicateKey(target), target]));
+        return normalized.map(targetKey => targetMap.get(targetKey)).filter(Boolean);
     }
 
     function updateDomainBindingTable() {
@@ -5661,7 +5905,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
             return;
         }
 
-        tbody.innerHTML = TARGETS.map(target => {
+        tbody.innerHTML = getOrderedDomainTargets().map(target => {
             const bindingKey = getTargetDuplicateKey(target);
             const boundPool = getBoundPoolForTarget(target);
             const mode = target.mode === 'TXT' ? 'TXT' : 'A';
@@ -5696,6 +5940,165 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         }).join('');
     }
 
+    function openDomainPoolOrderDialog() {
+        const order = getOrderedDomainTargets().map(getTargetDuplicateKey);
+        if (order.length < 2) {
+            showToast('至少需要两个管理域名才能排序', 'info');
+            return;
+        }
+
+        const overlay = document.createElement('div');
+        overlay.className = 'custom-modal-overlay';
+        overlay.innerHTML = \`
+            <div class="custom-modal pool-order-modal" role="dialog" aria-modal="true" aria-labelledby="domain-pool-order-title">
+                <div class="custom-modal-title" id="domain-pool-order-title">↕️ 自定义绑定池排序</div>
+                <div class="pool-order-hint">调整域名池绑定区域中管理域名的显示顺序，不会改变维护执行顺序。</div>
+                <div class="pool-order-list" id="domain-pool-order-list"></div>
+                <div class="custom-modal-buttons">
+                    <button class="btn-abandon" type="button" id="domain-pool-order-cancel">取消</button>
+                    <button class="btn-continue" type="button" id="domain-pool-order-save">保存排序</button>
+                </div>
+            </div>
+        \`;
+        document.body.appendChild(overlay);
+
+        const list = byId('domain-pool-order-list');
+        const closeDialog = () => {
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        };
+        const renderOrder = () => {
+            list.innerHTML = order.map((targetKey, index) => {
+                const target = TARGETS.find(item => getTargetDuplicateKey(item) === targetKey) || {};
+                const mode = target.mode === 'TXT' ? 'TXT' : 'A';
+                const modeLabel = MODE_LABELS[mode] || mode;
+                return \`
+                    <div class="pool-order-item">
+                        <span class="pool-order-index">\${index + 1}</span>
+                        <span class="pool-order-name">
+                            <strong>\${escapeHTML(target.domain || targetKey)}</strong>
+                            <small>\${escapeHTML(modeLabel)}</small>
+                        </span>
+                        <span class="pool-order-actions">
+                            <button type="button" data-action="up" data-index="\${index}" title="上移" aria-label="上移" \${index === 0 ? 'disabled' : ''}>↑</button>
+                            <button type="button" data-action="down" data-index="\${index}" title="下移" aria-label="下移" \${index === order.length - 1 ? 'disabled' : ''}>↓</button>
+                        </span>
+                    </div>
+                \`;
+            }).join('');
+        };
+
+        list.addEventListener('click', event => {
+            const button = event.target.closest('button[data-action]');
+            if (!button || button.disabled) return;
+            const index = Number(button.dataset.index);
+            const targetIndex = button.dataset.action === 'up' ? index - 1 : index + 1;
+            if (targetIndex < 0 || targetIndex >= order.length) return;
+            [order[index], order[targetIndex]] = [order[targetIndex], order[index]];
+            renderOrder();
+        });
+        byId('domain-pool-order-cancel').onclick = closeDialog;
+        overlay.addEventListener('click', event => {
+            if (event.target === overlay) closeDialog();
+        });
+        byId('domain-pool-order-save').onclick = async () => {
+            const saveButton = byId('domain-pool-order-save');
+            saveButton.disabled = true;
+            saveButton.textContent = '保存中...';
+            try {
+                const result = await apiPostJson('/api/save-domain-pool-order', { order });
+                if (!result.success) throw new Error(result.error || '保存失败');
+                applyPoolState(result);
+                closeDialog();
+                log('✅ 域名池绑定顺序已保存', 'success');
+                showToast('域名池绑定顺序已保存');
+            } catch (e) {
+                saveButton.disabled = false;
+                saveButton.textContent = '保存排序';
+                log(\`❌ 保存域名池绑定顺序失败: \${e.message}\`, 'error');
+                showToast(e.message || '保存排序失败', 'error');
+            }
+        };
+        renderOrder();
+    }
+
+    function openPoolOrderDialog() {
+        const order = (Array.isArray(availablePools) ? availablePools : [])
+            .filter(poolKey => ![POOL_DEFAULT_KEY, POOL_TRASH_KEY].includes(poolKey));
+        if (order.length < 2) {
+            showToast('至少需要两个自定义池才能排序', 'info');
+            return;
+        }
+
+        const overlay = document.createElement('div');
+        overlay.className = 'custom-modal-overlay';
+        overlay.innerHTML = \`
+            <div class="custom-modal pool-order-modal" role="dialog" aria-modal="true" aria-labelledby="pool-order-title">
+                <div class="custom-modal-title" id="pool-order-title">↕️ 自定义池排序</div>
+                <div class="pool-order-hint">默认池固定在最前，垃圾桶固定在最后。使用箭头调整自定义池顺序。</div>
+                <div class="pool-order-list" id="pool-order-list"></div>
+                <div class="custom-modal-buttons">
+                    <button class="btn-abandon" type="button" id="pool-order-cancel">取消</button>
+                    <button class="btn-continue" type="button" id="pool-order-save">保存排序</button>
+                </div>
+            </div>
+        \`;
+        document.body.appendChild(overlay);
+
+        const list = byId('pool-order-list');
+        const closeDialog = () => {
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        };
+        const renderOrder = () => {
+            list.innerHTML = order.map((poolKey, index) => \`
+                <div class="pool-order-item" data-pool-key="\${escapeHTML(poolKey)}">
+                    <span class="pool-order-index">\${index + 1}</span>
+                    <span class="pool-order-name">
+                        <strong>\${escapeHTML(getPoolName(poolKey))}</strong>
+                        <small>\${escapeHTML(getPoolFixedName(poolKey))}</small>
+                    </span>
+                    <span class="pool-order-actions">
+                        <button type="button" data-action="up" data-index="\${index}" title="上移" aria-label="上移" \${index === 0 ? 'disabled' : ''}>↑</button>
+                        <button type="button" data-action="down" data-index="\${index}" title="下移" aria-label="下移" \${index === order.length - 1 ? 'disabled' : ''}>↓</button>
+                    </span>
+                </div>
+            \`).join('');
+        };
+
+        list.addEventListener('click', event => {
+            const button = event.target.closest('button[data-action]');
+            if (!button || button.disabled) return;
+            const index = Number(button.dataset.index);
+            const targetIndex = button.dataset.action === 'up' ? index - 1 : index + 1;
+            if (targetIndex < 0 || targetIndex >= order.length) return;
+            [order[index], order[targetIndex]] = [order[targetIndex], order[index]];
+            renderOrder();
+        });
+        byId('pool-order-cancel').onclick = closeDialog;
+        overlay.addEventListener('click', event => {
+            if (event.target === overlay) closeDialog();
+        });
+        byId('pool-order-save').onclick = async () => {
+            const saveButton = byId('pool-order-save');
+            saveButton.disabled = true;
+            saveButton.textContent = '保存中...';
+            try {
+                const result = await apiPostJson('/api/save-pool-order', {
+                    order: [POOL_DEFAULT_KEY, ...order, POOL_TRASH_KEY]
+                });
+                if (!result.success) throw new Error(result.error || '保存失败');
+                applyPoolState(result);
+                closeDialog();
+                log('✅ 池排序已保存', 'success');
+                showToast('池排序已保存');
+            } catch (e) {
+                saveButton.disabled = false;
+                saveButton.textContent = '保存排序';
+                log(\`❌ 保存池排序失败: \${e.message}\`, 'error');
+                showToast(e.message || '保存排序失败', 'error');
+            }
+        };
+        renderOrder();
+    }
     function promptPoolName(message, initialValue = '') {
         const name = prompt(message, initialValue);
         if (!name) return '';
