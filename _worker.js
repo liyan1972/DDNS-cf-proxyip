@@ -1256,7 +1256,7 @@ function normalizeTargetMode(value) {
 }
 
 function normalizeListValues(value, normalizer = item => item) {
-    const source = Array.isArray(value) ? value : String(value || '').split(/[,;\s/]+/);
+    const source = Array.isArray(value) ? value : String(value || '').split(/[,;\uFF0C\s]+/);
     return [...new Set(source.map(item => normalizer(String(item).trim())).filter(Boolean))];
 }
 
@@ -2565,8 +2565,8 @@ function formatReportMeta(item = {}) {
     const parts = [];
     if (item.colo && item.colo !== 'N/A') parts.push(item.colo);
     if (item.time && item.time !== '-') parts.push(`${item.time}ms`);
-    const countries = String(item.country || '').split(/[\/,\s]+/).filter(v => !isUnknownMetaValue(v));
-    const asns = String(item.asn || '').split(/[\/,\s]+/)
+    const countries = String(item.country || '').split(/[\/,\uFF0C\s]+/).filter(v => !isUnknownMetaValue(v));
+    const asns = String(item.asn || '').split(/[\/,\uFF0C\s]+/)
         .filter(v => !isUnknownMetaValue(v))
         .map(v => v.toUpperCase().startsWith('AS') ? v.toUpperCase() : 'AS' + v);
     if (countries.length) parts.push([...new Set(countries)].join('/'));
@@ -6506,9 +6506,9 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
         const searchable = [meta.asn, meta.country, meta.comment, line].join(' ').toLowerCase();
         if (Array.isArray(criteria)) return criteria.some(group => lineMatchesUniversalFilter(line, group));
         if (criteria.ports.length && !criteria.ports.some(p => typeof p === 'number' ? portNum === p : portNum >= p.start && portNum <= p.end)) return false;
-        const countryValues = String(meta.country || '').toUpperCase().split(/[\/,\\s]+/).filter(Boolean);
+        const countryValues = String(meta.country || '').toUpperCase().split(/[\/,\uFF0C\\s]+)/.filter(Boolean);
         if (criteria.countries.length && !criteria.countries.some(country => countryValues.includes(country))) return false;
-        const asnValues = String(meta.asn || '').replace(/AS/gi, '').toUpperCase().split(/[\/,\\s]+/).filter(Boolean);
+        const asnValues = String(meta.asn || '').replace(/AS/gi, '').toUpperCase().split(/[\/,\uFF0C\\s]+)/.filter(Boolean);
         if (criteria.asns.length && !criteria.asns.some(asn => asnValues.includes(asn))) return false;
         if (criteria.stacks.length) {
             const lineStack = normalizeStackFilter(meta.stack);
