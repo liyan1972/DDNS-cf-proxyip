@@ -4,7 +4,7 @@
 
 // ==================== Editable configuration ====================
 // Change these values first when tuning runtime behavior.
-const APP_VERSION = '2026.09.21-21.25';
+const APP_VERSION = '2026.09.28-12.28';
 const APP_CONFIG_KEY = 'app_config';
 const GLOBAL_SETTINGS = {
     // ── IP 检测 ──
@@ -5299,7 +5299,7 @@ function renderClientScript({ targetsJson, settingsJson, appConfigJson, authEnab
     const r = await apiJson(\`/api/check-ip?ip=\${encodeURIComponent(addr)}\`);
     return { ip: addr, success: r.success, colo: r.colo || 'N/A', time: r.responseTime || '-', exits: r.exits || [], proxyIP: r.proxyIP, portRemote: r.portRemote, ipInfo: r.ipInfo || null, asn: r.asn, country: r.country, stack: r.stack, apiError: r.apiError || false };
     }
-    const addProbeButton = r => \`<button class="btn btn-sm btn-outline-primary" onclick="addToInput('\${escapeHTML(buildPoolLineFromCheckResult(r.ip, r))}')" title="添加到输入框">➕</button>\`;
+    const addProbeButton = r => \`<button class="btn btn-sm btn-outline-primary" onclick="addToInput('\${escapeHTML(escapeJSString(buildPoolLineFromCheckResult(r.ip, r)))}')" title="添加到输入框">➕</button>\`;
 
     function renderIPRow(r, actionHTML) {
     const infoHtml = formatExitInfo(r.exits) || (r.ipInfo ? formatIPInfo(r.ipInfo) : '-');
